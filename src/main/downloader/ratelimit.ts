@@ -5,8 +5,9 @@ export class RateLimiter {
   constructor(private minIntervalMs = 1000) {}
   async wait(): Promise<void> {
     const now = Date.now()
-    const waitMs = this.last + this.minIntervalMs - now
-    if (waitMs > 0) await sleep(waitMs)
-    this.last = Date.now()
+    const target = Math.max(this.last + this.minIntervalMs, now)
+    this.last = target
+    const d = target - now
+    if (d > 0) await sleep(d)
   }
 }

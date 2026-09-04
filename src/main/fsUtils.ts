@@ -3,6 +3,7 @@ import path from 'node:path'
 
 export function safeName(name: string, maxLength = 100): string {
   let out = name.replace(/[\\/:*?"<>|]/g, '-').trim()
+  if (!out) out = 'untitled'
   if (out.length > maxLength) out = `${out.slice(0, maxLength - 3)}...`
   return out
 }

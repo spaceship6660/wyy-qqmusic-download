@@ -8,6 +8,8 @@ describe('safeName', () => {
   it('替换非法字符并截断 100 字符', () => {
     expect(safeName('A/B:C*D?E"F<G>H|I')).toBe('A-B-C-D-E-F-G-H-I')
     expect(safeName('x'.repeat(120)).length).toBeLessThanOrEqual(100)
+    expect(safeName('   ')).toBe('untitled')
+    expect(safeName('')).toBe('untitled')
   })
 })
 
