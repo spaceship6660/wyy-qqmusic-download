@@ -14,7 +14,10 @@ function jsonFetch(status: number, body: unknown): typeof fetch {
   })) as unknown as typeof fetch
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers() // 重试用例用 fake timers 控制退避，避免泄漏到其他用例
+})
 
 // 这些用例不关心请求体内容，但 strict TS 下 MusicuReq 的 module/method/param 必填
 const dummyReq = { module: 'x', method: 'y', param: {} }
@@ -48,13 +51,55 @@ describe('postMusicu', () => {
   })
 
   it('路径缺失抛 QqApiError 并携带原始数据', async () => {
-    const client = createQqClient(jsonFetch(200, { req: { data: {} } }), { uin: '0' })
-    await expect(client.postMusicu({ req: dummyReq }, { path: ['a', 'b'] }))
-      .rejects.toThrow(QqApiError)
+    const fetchMock = jsonFetch(200, { req: { data: {} } })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const err = await client
+      .postMusicu({ req: dummyReq }, { path: ['a', 'b'] })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      )
+    expect(err).toBeInstanceOf(QqApiError)
+    // 原始响应随错误带出，便于调用方诊断
+    expect((err as QqApiError).raw).toEqual({ req: { data: {} } })
+    expect((err as QqApiError).code).toBe('path-missing')
   })
 
-  it('非 200 / 空响应（风控特征）抛 QqApiError(rate-limited)', async () => {
+  it('空响应（风控特征）抛 QqApiError(rate-limited)', async () => {
     const client = createQqClient(jsonFetch(200, ''), { uin: '0' })
     await expect(client.postMusicu({ req: dummyReq }, { path: [] })).rejects.toThrow(/rate/i)
+  })
+
+  it('网络层错误才重试：第一次失败第二次成功（maxRetries: 1）', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce(
+          new Response('{"req":{"data":{"body":{"song":{"list":[{"mid":"M1"}]}}}}}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      const client = createQqClient(fetchMock, { uin: '0' })
+      const pending = client.postMusicu({ req: dummyReq }, {
+        path: ['req', 'data', 'body', 'song', 'list'],
+        maxRetries: 1,
+      })
+      // 第一次 fetch 立即 rejected → 进入退避 sleep(1000)，用 fake timers 跳过
+      await vi.advanceTimersByTimeAsync(1000)
+      await expect(pending).resolves.toEqual([{ mid: 'M1' }])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('QqApiError（风控）不重试：只请求一次', async () => {
+    const fetchMock = jsonFetch(200, '')
+    const client = createQqClient(fetchMock, { uin: '0' })
+    await expect(client.postMusicu({ req: dummyReq }, { path: [] })).rejects.toThrow(/rate/i)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
