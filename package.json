@@ -1,0 +1,31 @@
+{
+  "name": "qq-music-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QQ 音乐下载器（Electron）",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "node-id3": "^0.2.6",
+    "pinia": "^3.0.1",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "electron": "^36.3.2",
+    "electron-vite": "^3.1.0",
+    "music-metadata": "^11.0.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^2.2.10"
+  }
+}
