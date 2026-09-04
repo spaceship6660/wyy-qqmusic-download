@@ -1,0 +1,44 @@
+{
+  "req": {
+    "data": {
+      "body": {
+        "song": {
+          "list": [
+            {
+              "mid": "004Ti8rT003TaZ",
+              "name": "天空之城",
+              "singer": [{ "name": "久石让" }],
+              "album": {
+                "name": "天空之城印象集",
+                "picUrl": "https://y.gtimg.cn/music/photo_new/T002R300x300M000ALBMID1.jpg"
+              },
+              "file": { "media_mid": "004Ti8rT003TaZ" },
+              "interval": 273
+            },
+            {
+              "mid": "002Xq29X3bL0Xb",
+              "name": "我的天空",
+              "singer": [{ "name": "南征北战NZBZ" }, { "name": "白勺啊白" }],
+              "album": {
+                "name": "我的天空",
+                "picUrl": "https://y.gtimg.cn/music/photo_new/T002R300x300M000ALBMID2.jpg"
+              },
+              "file": { "media_mid": "002Xq29X3bL0Xb" },
+              "interval": 249
+            },
+            {
+              "mid": "003OUlho2HcRHC",
+              "name": "天空之城（纯音乐）",
+              "singer": [{ "name": "宫崎骏" }],
+              "album": {
+                "picUrl": "https://y.gtimg.cn/music/photo_new/T002R300x300M000ALBMID3.jpg"
+              },
+              "file": { "media_mid": "003OUlho2HcRHC" },
+              "interval": 231
+            }
+          ]
+        }
+      }
+    }
+  }
+}

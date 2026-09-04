@@ -1,0 +1,16 @@
+{
+  "info": {
+    "data": {
+      "track_info": {
+        "mid": "004Ti8rT003TaZ",
+        "title": "天空之城",
+        "time_public": "2020-05-01",
+        "interval": 200,
+        "singer": [{ "name": "久石让" }],
+        "album": { "mid": "ALBMID", "name": "天空之城印象集" },
+        "file": { "media_mid": "MED001", "size_flac": 123, "size_320mp3": 456 },
+        "flags": { "try_begin": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "data": {
+    "name": "专辑名",
+    "list": [
+      {
+        "songmid": "004Ti8rT003TaZ",
+        "songname": "天空之城",
+        "albumname": "天空之城印象集",
+        "albummid": "ALBMID1",
+        "singer": [{ "name": "久石让" }]
+      },
+      {
+        "songmid": "004Z8Ihr3J2gkn",
+        "songname": "伴随着你",
+        "albumname": "天空之城印象集",
+        "albummid": "ALBMID1",
+        "singer": [{ "name": "久石让" }]
+      }
+    ]
+  }
+}
