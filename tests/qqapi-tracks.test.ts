@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -32,6 +32,10 @@ describe('搜索', () => {
     expect(t.id).toBeTruthy()
     expect(t.artist).toBeTypeOf('string')
     expect(t.cover).toContain('http')
+    expect(tracks[1].artist).toBe('南征北战NZBZ / 白勺啊白')
+    expect(tracks[0].vip).toBeUndefined()
+    expect(tracks[0].duration).toBeTypeOf('number')
+    expect(tracks[3].artist).toBe('未知歌手')
   })
 })
 
@@ -42,6 +46,9 @@ describe('单曲详情', () => {
     expect(d.mediaMid).toBeTruthy()
     expect(typeof d.date).toBe('string')
     expect(typeof d.vip).toBe('boolean')
+    expect(d.sizes.flac).toBe(123)
+    expect(d.vip).toBe(true)
+    expect(d.date).toBe('2020-05-01')
   })
 })
 
@@ -52,6 +59,7 @@ describe('单曲链接', () => {
     expect(t.id).toBe('004Ti8rT003TaZ')
     expect(t.name).toBeTruthy()
     expect(t.mediaMid).toBeTruthy()
+    expect(t.vip).toBe(true)
   })
 })
 
@@ -61,6 +69,13 @@ describe('链接解析', () => {
     expect(parseLink('https://y.qq.com/n/ryqq/playlist/1374105607')).toEqual({ kind: 'playlist', id: '1374105607' })
     expect(parseLink('https://y.qq.com/n/ryqq/albumDetail/000gXCTb2AhRR1')).toEqual({ kind: 'album', id: '000gXCTb2AhRR1' })
     expect(parseLink('随便一句话')).toBeNull()
+  })
+})
+
+describe('stripJsonp', () => {
+  it('剥离 JSONP 包裹，普通 JSON 原样返回', () => {
+    expect(stripJsonp('MusicJsonCallback({});')).toBe('{}')
+    expect(stripJsonp('{"a":1}')).toBe('{"a":1}')
   })
 })
 

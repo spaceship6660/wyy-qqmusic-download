@@ -35,6 +35,11 @@
               },
               "file": { "media_mid": "003OUlho2HcRHC" },
               "interval": 231
+            },
+            {
+              "mid": "004NoSinger00001",
+              "name": "无歌手曲目",
+              "album": { "name": "无歌手专辑" }
             }
           ]
         }

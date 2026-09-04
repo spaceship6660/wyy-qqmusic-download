@@ -1,5 +1,7 @@
 import type { QqClient, MusicuReq } from './client'
 
+export type Quality = 'flac' | 'ape' | '320' | '128' | 'm4a'
+
 export interface TrackDTO {
   id: string
   name: string
