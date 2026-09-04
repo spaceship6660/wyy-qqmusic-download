@@ -1,3 +1,4 @@
+import { QqApiError } from './client'
 import type { QqClient } from './client'
 import type { Quality } from './tracks'
 
@@ -18,24 +19,61 @@ export interface AudioUrlResult {
   downgraded: boolean
 }
 
-interface VkeyRow { songmid?: string; purl?: string; filename?: string }
+interface VkeyRow { songmid?: string; filename?: string; purl?: string }
 
-function pickPurl(rows: VkeyRow[], songmid: string): string {
-  const row = rows.find((r) => r?.purl && (!r.songmid || r.songmid === songmid))
-  return (row?.purl ?? '') as string
+/** 从「文件名前缀」反查实际质量档（yt-dlp 同款做法）。C200=48k m4a 归 m4a。未知前缀返回 undefined。 */
+export function qualityFromPrefix(prefix: string): Quality | undefined {
+  switch (prefix) {
+    case 'F000': return 'flac'
+    case 'A000': return 'ape'
+    case 'M800': return '320'
+    case 'M500': return '128'
+    case 'C400':
+    case 'C200': return 'm4a'
+    default: return undefined
+  }
 }
 
-async function requestVkey(
+/** 构造从 preferred 档起向下（含降级档）的全部候选 filename。每档两种形式：mediaMid 单写 + 双 mid 写，去重。 */
+export function buildCandidates(
+  songmid: string,
+  mediaMid: string | undefined,
+  preferred: Quality,
+): Array<{ quality: Quality; filename: string }> {
+  const startIdx = QUALITY_LADDER.indexOf(preferred)
+  const out: Array<{ quality: Quality; filename: string }> = []
+  const seen = new Set<string>()
+  const singleMid = mediaMid && mediaMid !== songmid ? mediaMid : songmid
+  for (let i = startIdx; i < QUALITY_LADDER.length; i++) {
+    const q = QUALITY_LADDER[i]
+    const { prefix, ext } = QUALITY_MAP[q]
+    for (const form of [singleMid, `${songmid}${songmid}`]) {
+      const fn = `${prefix}${form}.${ext}`
+      if (seen.has(fn)) continue
+      seen.add(fn)
+      out.push({ quality: q, filename: fn })
+    }
+  }
+  return out
+}
+
+/** 取直链：一次批量请求全部候选，按响应行挑选有 purl 的最高档候选；实际质量以返回的文件名前缀为准。 */
+export async function getAudioUrl(
   client: QqClient,
   songmid: string,
-  filename: string,
-): Promise<{ sip: string; rows: VkeyRow[] }> {
+  mediaMid: string | undefined,
+  preferred: Quality,
+): Promise<AudioUrlResult> {
+  const startIdx = QUALITY_LADDER.indexOf(preferred)
+  const candidates = buildCandidates(songmid, mediaMid, preferred)
+  const byFilename = new Map(candidates.map((c) => [c.filename, c.quality]))
+
   const data = (await client.postMusicu({
     req_1: {
       module: 'vkey.GetVkeyServer',
       method: 'CgiGetVkey',
       param: {
-        filename: [filename],
+        filename: candidates.map((c) => c.filename),
         guid: String(Math.floor(Math.random() * 9_000_000_000) + 1_000_000_000),
         songmid: [songmid],
         songtype: [0],
@@ -45,41 +83,22 @@ async function requestVkey(
       },
     },
   }, { path: ['req_1', 'data'] })) as { sip?: string[]; midurlinfo?: VkeyRow[] }
-  // midurlinfo 行与本次请求的 filename 一一对应（部分行不带 filename 字段时保留，
-  // 交由 pickPurl 按 songmid 兜底匹配）
-  const rows = (data?.midurlinfo ?? []).filter((r) => !r?.filename || r.filename === filename)
-  return { sip: data?.sip?.[0] ?? '', rows }
-}
 
-/** 取直链。按质量档位请求；空 purl 降级。mediaMid 与 songmid 不同时先试 mediaMid 再试双 mid。 */
-export async function getAudioUrl(
-  client: QqClient,
-  songmid: string,
-  mediaMid: string | undefined,
-  preferred: Quality,
-): Promise<AudioUrlResult> {
-  const startIdx = QUALITY_LADDER.indexOf(preferred)  // flac→0, 320→2 …
-  const filenames = new Set<string>()
-  if (mediaMid && mediaMid !== songmid) filenames.add(`${QUALITY_MAP[preferred].prefix}${mediaMid}.${QUALITY_MAP[preferred].ext}`)
-  filenames.add(`${QUALITY_MAP[preferred].prefix}${songmid}${songmid}.${QUALITY_MAP[preferred].ext}`)
-
-  for (const fn of filenames) {
-    const { sip, rows } = await requestVkey(client, songmid, fn)
-    const purl = pickPurl(rows, songmid)
-    if (sip && purl) return { url: sip + purl, quality: preferred, downgraded: false }
-  }
-
-  // 降级链：从 preferred 的下一个档位开始往下找
-  for (let i = startIdx + 1; i < QUALITY_LADDER.length; i++) {
-    const q = QUALITY_LADDER[i]
-    const f1 = `${QUALITY_MAP[q].prefix}${mediaMid ?? songmid}.${QUALITY_MAP[q].ext}`
-    const f2 = `${QUALITY_MAP[q].prefix}${songmid}${songmid}.${QUALITY_MAP[q].ext}`
-    for (const fn of new Set([f1, f2])) {
-      const { sip, rows } = await requestVkey(client, songmid, fn)
-      const purl = pickPurl(rows, songmid)
-      if (sip && purl) return { url: sip + purl, quality: q, downgraded: true }
+  const sip = data?.sip?.[0] ?? ''
+  for (const row of data?.midurlinfo ?? []) {
+    if (!row?.purl) continue
+    const requested = byFilename.get(row.filename ?? '')
+    const legacyOk = !requested && !row.filename && (!row.songmid || row.songmid === songmid)
+    if (!sip || (!requested && !legacyOk)) continue
+    const purlPrefix = (row.purl.split('/')[0] ?? '').slice(0, 4)
+    const actual = qualityFromPrefix(purlPrefix) ?? qualityFromPrefix((row.filename ?? '').slice(0, 4)) ?? requested
+    if (!actual) continue
+    return {
+      url: sip + row.purl,
+      quality: actual,
+      downgraded: QUALITY_LADDER.indexOf(actual) > startIdx,
     }
   }
 
-  throw new Error('未拿到可播放 URL：登录过期或账号权益不足（无损需绿钻权益）')
+  throw new QqApiError('未拿到可播放 URL（可能需要登录，或账号权益不足，无损需绿钻权益）', 'no-playable-url')
 }
