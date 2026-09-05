@@ -58,6 +58,9 @@ export async function downloadFile(
       fs.renameSync(part, dest)
       return { size, path: dest }
     } catch (err) {
+      // 404/403 等确定性 HTTP 错误重试无意义（直链过期/风控），立即抛出，
+      // 避免 3 次 × 30s 白等；由上层 runner 重取直链后重下
+      if (err instanceof DownloadHttpError && (err.status === 404 || err.status === 403)) throw err
       lastErr = err
       if (fs.existsSync(part)) fs.unlinkSync(part)
     }

@@ -28,6 +28,11 @@ export class DownloadQueue extends EventEmitter {
 
   constructor(private deps: QueueDeps) { super() }
 
+  /** 运行时调整并发（settingsSet 生效；下限 1） */
+  setConcurrency(n: number): void {
+    this.deps.concurrency = Math.max(1, n)
+  }
+
   enqueue(jobs: DownloadJob[]): void {
     this.queue.push(...jobs)
     this.pump()

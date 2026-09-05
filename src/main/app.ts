@@ -1,7 +1,8 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
 import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, TrackDTO } from './qqapi/tracks'
-import { getAudioUrl } from './qqapi/urls'
+import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { createAuth } from './auth'
 import { DownloadQueue } from './downloader/queue'
 import { RateLimiter } from './downloader/ratelimit'
@@ -40,37 +41,59 @@ export function createApp(deps: AppDeps) {
       const resolveOnce = async (q: typeof job.quality) => getAudioUrl(client, job.track.id, job.track.mediaMid, q)
       const first = await resolveOnce(job.quality)
       if (first.downgraded) job.downgraded = true
-      // 2) 下载
-      const ext = first.quality === 'm4a' ? 'm4a' : first.quality === 'flac' ? 'flac' : first.quality === 'ape' ? 'ape' : 'mp3'
+      // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
+      //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
+      const ext = QUALITY_MAP[first.quality].ext
       const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
-      const dest = uniquePath(path.join(settings.downloadDir, `${name}.${ext}`))
-      try {
-        await downloadFile(first.url, dest, { retries: 2, onProgress: (got, total) => {
-          report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
-        } })
-      } catch (err) {
-        if (err instanceof TypeError) {   // 网络层错误才重取直链重下
-          const fresh = await resolveOnce(job.quality)
-          await downloadFile(fresh.url, dest)
-        } else {
-          throw err
+      let dest = uniquePath(path.join(settings.downloadDir, `${name}.${ext}`))
+      fs.mkdirSync(settings.downloadDir, { recursive: true })
+      while (true) {
+        try {
+          const fd = fs.openSync(dest, 'wx')
+          fs.closeSync(fd)
+          break
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+          dest = uniquePath(dest)
         }
       }
-      // 3) 标签（T12 接入歌词前 lyrics 为空串）
-      const detail = await getTrackDetail(client, job.track.id)
-      const cover = await fetchCover(job.track.cover, fetchImpl)
-      const meta = {
-        title: job.track.name,
-        artist: job.track.artist,
-        album: job.track.album || '未知专辑',
-        date: detail.date,
-        copyright: '',
-        genre: '',
-        lyrics: settings.lyricMode !== 'none' ? '' : '',   // T12 接入 fetchLyric
-        cover: cover?.data,
-        coverMime: cover?.mime,
+      const doDownload = (url: string, destPath: string) => downloadFile(url, destPath, {
+        retries: 2,
+        onProgress: (got, total) => {
+          report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
+        },
+      })
+      try {
+        await doDownload(first.url, dest)
+      } catch (err) {
+        // catch-all 重取直链重下（标签步骤在块外，无掩盖调用方错误的风险）；
+        // 失败清理占位文件，避免 .part 并发碰撞后的废文件堆积
+        fs.rmSync(dest, { force: true })
+        const fresh = await resolveOnce(job.quality)
+        if (fresh.downgraded) job.downgraded = true
+        await doDownload(fresh.url, dest)
       }
-      await tagFile(dest, meta, { saveLrc: settings.lyricMode === 'both' || settings.lyricMode === 'lrc' })
+      // 3) 标签（T12 接入歌词前 lyrics 为空串）；失败时清理已下载文件（含 .lrc）防堆积
+      try {
+        const detail = await getTrackDetail(client, job.track.id)
+        const cover = await fetchCover(job.track.cover, fetchImpl)
+        const meta = {
+          title: job.track.name,
+          artist: job.track.artist,
+          album: job.track.album || '未知专辑',
+          date: detail.date,
+          copyright: '',
+          genre: '',
+          lyrics: settings.lyricMode !== 'none' ? '' : '',   // T12 接入 fetchLyric
+          cover: cover?.data,
+          coverMime: cover?.mime,
+        }
+        await tagFile(dest, meta, { saveLrc: settings.lyricMode === 'both' || settings.lyricMode === 'lrc' })
+      } catch (e) {
+        fs.rmSync(dest, { force: true })
+        fs.rmSync(dest.replace(/\.(mp3|flac|ape|m4a)$/i, '.lrc'), { force: true })
+        throw e
+      }
       return { outputPath: dest }
     },
   })
@@ -92,6 +115,7 @@ export function createApp(deps: AppDeps) {
     fetchTracksByLink: async (url: string) => {
       const kind = parseLink(url)
       if (!kind) return null
+      if (kind.kind === 'song') return { kind, tracks: [await getSingleTrack(client, kind.id)] }
       if (kind.kind === 'playlist') return { kind, tracks: await fetchPlaylist(client, kind.id) }
       if (kind.kind === 'album') return { kind, tracks: await fetchAlbum(client, kind.id) }
       return null
@@ -99,14 +123,24 @@ export function createApp(deps: AppDeps) {
     enqueue: (tracks: TrackDTO[], quality: Settings['quality']) => {
       settings.quality = quality
       saveSettings(settingsFile, settings)
-      queue.enqueue(tracks.map((t) => ({
-        id: t.id, source: 'qq' as const, track: t, quality, state: 'queued' as const, progress: 0,
-      })))
+      // 同次入队按 track.id 去重（重复 id 只留一份）
+      const seen = new Set<string>()
+      const jobs = tracks
+        .filter((t) => {
+          if (seen.has(t.id)) return false
+          seen.add(t.id)
+          return true
+        })
+        .map((t) => ({
+          id: t.id, source: 'qq' as const, track: t, quality, state: 'queued' as const, progress: 0,
+        }))
+      queue.enqueue(jobs)
       return true
     },
     settingsGet: () => settings,
     settingsSet: (patch: Partial<Settings>) => {
-      settings = { ...settings, ...patch }
+      settings = { ...settings, ...patch, concurrency: Math.max(1, patch.concurrency ?? settings.concurrency) }
+      queue.setConcurrency(settings.concurrency)
       saveSettings(settingsFile, settings)
       return settings
     },
@@ -114,7 +148,10 @@ export function createApp(deps: AppDeps) {
     authPoll: () => auth.poll(),
     authWaitResult: (ms: number) => auth.waitForResult(ms),
     authImportCookie: (cookie: string) => auth.importCookie(cookie),
-    authStatus: () => ({ loggedIn: auth.getStatus().state === 'loggedIn', uin: auth.getStatus().uin }),
+    authStatus: () => {
+      const s = auth.getStatus()
+      return { loggedIn: s.state === 'loggedIn', uin: s.uin }
+    },
   }
 }
 
