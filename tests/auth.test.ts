@@ -223,6 +223,46 @@ describe('createAuth', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('回归：authorize 302 跟跳后方法降为 GET 且 body 清空（防 POST 打 GET 落地页 405）', async () => {
+    // 防回归锚：authorize 首跳是 POST，302 指向 y.qq.com/portal/wx_redirect.html（GET 落地页）。
+    // 按 urllib/浏览器语义，302/303 跟随跳转时 POST 降为 GET 并丢弃 body（307/308 才保留原方法与 body）；
+    // 若未来有人把 302 跟跳改回复播 POST（复读 form body 打 GET 落地页会 405），此用例必挂。
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-get-'))
+    const log: { url: string; init?: RequestInit }[] = []
+    const fetchMock = routerFetch({
+      login: () =>
+        "ptuiCB('0','登录成功！','https://ssl.ptlogin2.qq.com/check_sig?ptqrtoken=K&skey=XYZ&uin=9876&ptsigx=SIGAB')",
+      authorizeLocation:
+        'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F&code=AUTHCODE123&state=state',
+      qqLogin: { req: { code: 0, data: { musicid: 9876, musickey: 'KEY123' } } },
+      requestLog: log,
+    })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const auth = createAuth({ qqClient: client, fetchImpl: fetchMock, cookiePath: path.join(dir, 'cookie.json') })
+
+    await auth.startQr()
+    const result = await auth.waitForResult(5000)
+    expect(result.ok).toBe(true)
+    expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o9876' })
+
+    // 第 1 跳 authorize 仍为 POST（方法降级只发生在跟随 302 之后）
+    const authCall = log.find((c) => {
+      try { return new URL(c.url).pathname === '/oauth2.0/authorize' } catch { return false }
+    })
+    expect(authCall?.init?.method).toBe('POST')
+    expect(String(authCall?.init?.body)).toContain('client_id=100497308')
+    // 302 落地跳是 2 跳链：第 2 跳确实发出过（fetchChain 跟链证据）
+    const landingCall = log.filter((c) => {
+      try { return new URL(c.url).hostname === 'y.qq.com' } catch { return false }
+    })
+    expect(landingCall.length).toBe(1)
+    // 第 2 跳（y.qq.com 落地页）：必须 GET（method 为 undefined 即默认 GET）且 body 为空
+    const secondHop = landingCall[0]
+    expect(secondHop.init?.method === undefined || secondHop.init?.method === 'GET').toBe(true)
+    expect(secondHop.init?.body).toBeUndefined()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('手动导入成功：→ true、loggedIn、落盘', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-imp-'))
     const cookiePath = path.join(dir, 'cookie.json')

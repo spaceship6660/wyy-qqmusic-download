@@ -140,6 +140,10 @@ export function createAuth(options: AuthOptions): Auth {
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location')
         if (!loc) return { finalUrl: url, finalStatus: res.status, body }
+        // 302/303 跟随跳转时方法降为 GET（urllib/浏览器语义；否则 POST 打 GET 落地页会 405）
+        if (res.status === 302 || res.status === 303) {
+          init = { ...init, method: 'GET', body: undefined }
+        }
         url = new URL(loc, url).toString()
         continue
       }
