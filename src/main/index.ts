@@ -1,5 +1,31 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, ipcMain, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
+import { createApp } from './app'
+
+const appInstance = createApp({
+  userDataDir: app.getPath('userData'),
+  emitEvent: (channel, payload) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      try {
+        win.webContents.send(channel, payload)
+      } catch {
+        // 窗口未就绪/已销毁时忽略
+      }
+    }
+  },
+})
+
+ipcMain.handle('qq:search', (_e, q: string) => appInstance.search(q))
+ipcMain.handle('qq:linkTracks', (_e, url: string) => appInstance.fetchTracksByLink(url))
+ipcMain.handle('dl:enqueue', (_e, tracks: unknown[], quality: string) => appInstance.enqueue(tracks as any, quality as any))
+ipcMain.handle('settings:get', () => appInstance.settingsGet())
+ipcMain.handle('settings:set', (_e, patch: unknown) => appInstance.settingsSet(patch as any))
+ipcMain.handle('auth:startQr', () => appInstance.authStartQr())
+ipcMain.handle('auth:poll', () => appInstance.authPoll())
+ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult(ms))
+ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
+ipcMain.handle('auth:status', () => appInstance.authStatus())
 
 function createWindow(): void {
   const win = new BrowserWindow({
