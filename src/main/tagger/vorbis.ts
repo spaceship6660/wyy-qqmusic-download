@@ -35,24 +35,31 @@ export function parseVorbisCommentBlock(buf: Buffer): Record<string, string> {
 
 /**
  * FLAC METADATA_BLOCK_PICTURE（type 3 封面；宽高为 0 由播放器自适应）。
- * 布局（全部大端）：type + mimeLen + mime + descLen + desc + width + height + depth + colors + dataLen + data
+ * 布局（全部大端，严格顺序、无预分配头）：
+ * type + mimeLen + mime + descLen + desc + width + height + depth + colors + dataLen + data
+ * 总长 == 4+4+mimeLen+4+0+16+4+dataLen，无尾零计入
  */
 export function encodePictureBlock(cover: Buffer, mime: string): Buffer {
   const mimeB = Buffer.from(mime, 'ascii')
-  const total = 4 + 4 + mimeB.length + 4 + 4 + 16 + 4 + cover.length   // type..descLen + width/height/depth/colors + dataLen + data
-  const pic = Buffer.alloc(total)
-  let o = 0
-  pic.writeUInt32BE(3, o); o += 4                 // picture type: front cover
-  pic.writeUInt32BE(mimeB.length, o); o += 4
-  mimeB.copy(pic, o); o += mimeB.length
-  pic.writeUInt32BE(0, o); o += 4                 // description 为空
-  pic.writeUInt32BE(0, o); o += 4                 // width
-  pic.writeUInt32BE(0, o); o += 4                 // height
-  pic.writeUInt32BE(0, o); o += 4                 // color depth
-  pic.writeUInt32BE(0, o); o += 4                 // colors used
-  pic.writeUInt32BE(cover.length, o); o += 4
-  cover.copy(pic, o)
-  return pic
+  const desc = Buffer.alloc(0)
+  const parts: Buffer[] = []
+  const pushU32BE = (v: number): void => {
+    const b = Buffer.alloc(4)
+    b.writeUInt32BE(v, 0)
+    parts.push(b)
+  }
+  pushU32BE(3)                    // picture type: cover (front)
+  pushU32BE(mimeB.length)
+  parts.push(mimeB)
+  pushU32BE(desc.length)
+  parts.push(desc)
+  pushU32BE(0)                    // width
+  pushU32BE(0)                    // height
+  pushU32BE(0)                    // color depth
+  pushU32BE(0)                    // colors used
+  pushU32BE(cover.length)
+  parts.push(cover)
+  return Buffer.concat(parts)
 }
 
 const FLAC_MAGIC = 'fLaC'
