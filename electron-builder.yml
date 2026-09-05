@@ -1,0 +1,20 @@
+appId: com.local.music-downloader
+productName: 音乐下载器
+directories:
+  output: dist
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+  shortcutName: 音乐下载器
+electronLanguages:
+  - zh-CN
+  - en-US

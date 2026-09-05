@@ -8,6 +8,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
+    "dist": "electron-vite build && electron-builder --win",
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -21,6 +22,7 @@
     "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.0",
     "electron": "^36.3.2",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^3.1.0",
     "music-metadata": "^11.0.1",
     "typescript": "^5.8.3",
