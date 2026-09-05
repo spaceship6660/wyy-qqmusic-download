@@ -150,9 +150,10 @@ async function importCookie(): Promise<void> {
     if (my !== session) return
     if (ok) {
       stopPolling()
-      session++
+      session++ // 新会话代号（旧代号 my 已失效）
+      const mine = session
       await refreshStatus()
-      if (my !== session) return
+      if (mine !== session) return // 刷新状态期间被重开/关闭 → 丢弃
       closeQr()
     } else {
       cookieError.value = 'Cookie 无效：缺少 uin 或 qqmusic_key，导入失败'
