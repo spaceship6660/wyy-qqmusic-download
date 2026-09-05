@@ -122,6 +122,32 @@ export function createAuth(options: AuthOptions): Auth {
     }
   }
 
+  /** 跟随重定向链并把每一跳的 Set-Cookie 合并进 cookieJar（对应 Spica urllib opener 的默认跟链行为，
+   * 见 qqmusic.py:297-299 HTTPCookieProcessor + 内置 HTTPRedirectHandler）。
+   * 返回最终响应信息；maxHops 防死循环。
+   * 2026-09-04 修复：此前 check_sig/authorize 用 redirect:'manual' 只看第一跳，会漏掉重定向链
+   * 后续跳 Set-Cookie 种下的 p_skey（登录失败根因）——改用本函数逐跳跟随并逐跳收 Cookie。 */
+  async function fetchChain(
+    rawUrl: string,
+    init: RequestInit,
+    maxHops = 5,
+  ): Promise<{ finalUrl: string; finalStatus: number; body: Buffer }> {
+    let url = rawUrl
+    for (let hop = 0; hop <= maxHops; hop++) {
+      const res = await fetchImpl(url, { ...init, redirect: 'manual' })
+      mergeSetCookies(res)
+      const body = Buffer.from(await res.arrayBuffer())
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location')
+        if (!loc) return { finalUrl: url, finalStatus: res.status, body }
+        url = new URL(loc, url).toString()
+        continue
+      }
+      return { finalUrl: url, finalStatus: res.status, body }
+    }
+    throw new Error('登录重定向链过长')
+  }
+
   async function startQr(): Promise<QrSession> {
     // 1) 出二维码（参考自 Spica qqmusic.py:304-331）：GET ptqrshow，响应体 = PNG 字节，
     //    qrsig 从 Set-Cookie 取；返回 base64 data URL。
@@ -238,8 +264,10 @@ export function createAuth(options: AuthOptions): Auth {
       const uinMatch = checkSigUrl.match(/uin=(\d+)/)
       if (!sigx || !uinMatch) return fail('登录成功但缺少鉴权参数')
 
-      // 4) check_sig 换 p_skey（参考自 Spica qqmusic.py:398-433）；禁跟随重定向，
-      //    p_skey 从响应 Set-Cookie 取
+      // 4) check_sig 换 p_skey（参考自 Spica qqmusic.py:398-433）。Spica 的 urllib opener
+      //    默认跟随整条重定向链，cookie jar 累积每一跳的 Set-Cookie；p_skey 实际由链中
+      //    后续跳（login_jump）种下——此前 redirect:'manual' 只看首跳会漏掉它。
+      //    2026-09-04 修复：改用 fetchChain 逐跳跟随并把每跳 Set-Cookie 合并进 cookieJar。
       const checkParams = new URLSearchParams({
         uin: uinMatch[1],
         pttype: '1',
@@ -260,13 +288,10 @@ export function createAuth(options: AuthOptions): Auth {
         pt_light: '0',
         pt_3rd_aid: CLIENT_ID,
       })
-      const checkRes = await fetchImpl(`${CHECK_SIG_URL}?${checkParams.toString()}`, {
+      const { finalUrl: checkFinal } = await fetchChain(`${CHECK_SIG_URL}?${checkParams.toString()}`, {
         headers: { 'user-agent': LOGIN_UA, referer: XUI_REFERER, cookie: cookieJar },
-        redirect: 'manual',
         signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
       })
-      await checkRes.arrayBuffer() // 消费响应体
-      mergeSetCookies(checkRes)
       const pSkey = getCookie('p_skey')
       if (!pSkey) return fail('QQ 登录获取 p_skey 失败')
 
@@ -287,7 +312,9 @@ export function createAuth(options: AuthOptions): Auth {
         auth_time: String(Date.now()),
         ui: randomUUID(),
       })
-      const authRes = await fetchImpl(AUTHORIZE_URL, {
+      // code 在重定向链最终 URL 里（Spica 从跟链后的 resp.geturl() 取，qqmusic.py:463-469）；
+      // 链长 >1 时首跳 Location 不含 code，同样走 fetchChain 取最终 URL
+      const { finalUrl: authFinal } = await fetchChain(AUTHORIZE_URL, {
         method: 'POST',
         body: authData.toString(),
         headers: {
@@ -295,12 +322,9 @@ export function createAuth(options: AuthOptions): Auth {
           'content-type': 'application/x-www-form-urlencoded',
           cookie: cookieJar,
         },
-        redirect: 'manual',
         signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
       })
-      // code 在重定向 Location 里（Spica 从 resp.geturl()/Location 取）
-      const location = authRes.headers.get('location') ?? (checkRes.headers.get('location') ?? '')
-      const codeMatch = location.match(/(?:code=)(.+?)(?:&|$)/)
+      const codeMatch = authFinal.match(/(?:code=)(.+?)(?:&|$)/)
       if (!codeMatch) return fail('QQ 登录换取授权 code 失败')
 
       // 6) QQLogin 换 musicid/musickey（参考自 Spica qqmusic.py:472-507），走 client.postMusicu；
