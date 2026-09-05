@@ -19,7 +19,7 @@ const appInstance = createApp({
 
 ipcMain.handle('qq:search', (_e, q: string) => appInstance.search(q))
 ipcMain.handle('qq:linkTracks', (_e, url: string) => appInstance.fetchTracksByLink(url))
-ipcMain.handle('dl:enqueue', (_e, tracks: unknown[], quality: string) => appInstance.enqueue(tracks as any, quality as any))
+ipcMain.handle('dl:enqueue', (_e, payload: unknown) => appInstance.enqueue(payload as any))
 ipcMain.handle('settings:get', () => appInstance.settingsGet())
 ipcMain.handle('settings:set', (_e, patch: unknown) => appInstance.settingsSet(patch as any))
 ipcMain.handle('auth:startQr', () => appInstance.authStartQr())
@@ -58,7 +58,9 @@ ipcMain.handle('ne:auth:open', async () => {
         )
         if (cookieHeaderHasMusicU(header)) {
           appInstance.neAuthSaveFromWindow(header)
-          for (const w of BW.getAllWindows()) w.webContents.send('ne:authChanged', true)
+          for (const w of BW.getAllWindows()) {
+            if (!w.isDestroyed()) w.webContents.send('ne:authChanged', true)
+          }
         }
       } catch { /* 窗口关闭时 session 不可用等，忽略 */ }
     })()

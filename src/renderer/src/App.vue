@@ -5,9 +5,10 @@ import TrackGrid from './components/TrackGrid.vue'
 import QueuePanel from './components/QueuePanel.vue'
 import LoginButton from './components/LoginButton.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import NeteaseTab from './components/NeteaseTab.vue'
 import { useDownloadStore } from './stores/download'
 
-const tab = ref<'download' | 'decrypt' | 'settings'>('download')
+const tab = ref<'download' | 'decrypt' | 'netease' | 'settings'>('download')
 const store = useDownloadStore()
 const q = ref('')
 
@@ -32,7 +33,7 @@ async function doSearch(): Promise<void> {
 
 function enqueue(): void {
   const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
-  if (selected.length) void window.api.invoke('dl:enqueue', selected, store.quality)
+  if (selected.length) void window.api.invoke('dl:enqueue', { tracks: selected, quality: store.quality, source: 'qq' })
   store.clear()
 }
 
@@ -59,6 +60,7 @@ onMounted(() => {
       <nav>
         <button :class="{ active: tab === 'download' }" @click="tab = 'download'">下载</button>
         <button :class="{ active: tab === 'decrypt' }" @click="tab = 'decrypt'">解密</button>
+        <button :class="{ active: tab === 'netease' }" @click="tab = 'netease'">网易云</button>
         <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">设置</button>
       </nav>
     </header>
@@ -82,6 +84,7 @@ onMounted(() => {
         <QueuePanel :queue="store.queue" />
       </section>
       <section v-else-if="tab === 'decrypt'">解密（后续计划）</section>
+      <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>
   </div>

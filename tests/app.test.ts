@@ -7,6 +7,7 @@ import { createApp } from '../src/main/app'
 import type { App } from '../src/main/app'
 import type { TrackDTO } from '../src/main/qqapi/tracks'
 import NodeID3 from 'node-id3'
+import { parseFile } from 'music-metadata'
 
 // 主进程装配（T10）集成测试：QQ API 全部 mock（按 URL/body 路由），
 // 唯一真实网络 = 本地 http server 供 downloadFile 使用（downloadFile 走全局 fetch）。
@@ -45,11 +46,25 @@ async function startServer(delayMs = 0) {
  *   purls 顺序逐次取（第 N 次 vkey 请求用 purls[N]）；默认 purl = filename。
  * - get_song_detail_yqq：默认返回正常 track_info；detailBroken 时返回缺 data 的坏形状
  *   （postMusicu 路径缺失 → QqApiError）。
+ * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
  */
 function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean }) {
   let vkeyCalls = 0
   return vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
+    if (url.includes('/api/song/enhance/player/url')) {
+      // 网易云直链：本地 server 的 /ne.mp3（320 档直接命中，不触发降级）
+      return new Response(JSON.stringify({
+        code: 200,
+        data: [{ id: 123, url: `http://127.0.0.1:${opts.port}/ne.mp3`, br: 320000, code: 200 }],
+      }), { status: 200 })
+    }
+    if (url.includes('/api/song/lyric')) {
+      return new Response(JSON.stringify({ lrc: { lyric: '[00:01.00]测试歌词' } }), { status: 200 })
+    }
+    if (url.includes('/api/song/detail')) {
+      return new Response(JSON.stringify({ songs: [{ album: { publishTime: 1588262400000 } }] }), { status: 200 })
+    }
     if (url.includes('musicu.fcg')) {
       const body = JSON.parse(String(init?.body)) as any
       if (body.req_1?.method === 'CgiGetVkey') {
@@ -111,12 +126,12 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[] } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
     path.join(dir, 'settings.json'),
-    JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: 'none' }),
+    JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0)
   const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken })
@@ -160,7 +175,7 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     // 慢速下载源（~1.2s）：第二个任务启动时（限速器间隔 1s）第一个仍在写 .part，
     // 复现「check-then-write 撞同名 .part」场景；占位文件修复后二者各得其所。
     const env = await makeEnv({ delayMs: 1200 })
-    env.app.enqueue([track('a', '歌', '手'), track('b', '歌', '手')], '320')
+    env.app.enqueue({ tracks: [track('a', '歌', '手'), track('b', '歌', '手')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 2)
     expect(env.events.failed).toBe(0)
     expect(env.events.donePaths.length).toBe(2)
@@ -182,7 +197,7 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   it('I2: 404 直链 → 重取直链再下成功（404 不白等重试）', async () => {
     // 第一次 vkey 给出的直链 404，第二次 200；断言下载源恰好收到两次请求
     const env = await makeEnv({ purls: ['gone.mp3', 'ok.mp3'] })
-    env.app.enqueue([track('x', '直链歌')], '320')
+    env.app.enqueue({ tracks: [track('x', '直链歌')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 1)
     expect(env.events.failed).toBe(0)
     expect(env.recorded).toEqual(['/gone.mp3', '/ok.mp3']) // 无 3 次×退避重试
@@ -195,7 +210,7 @@ describe('createApp runner 装配（T10 评审修复）', () => {
 
   it('I7: 标签失败 → jobFailed 且已下载文件被清理', async () => {
     const env = await makeEnv({ detailBroken: true })
-    env.app.enqueue([track('y')], '320')
+    env.app.enqueue({ tracks: [track('y')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.failed >= 1)
     expect(env.events.done).toBe(0)
     expect(fs.readdirSync(env.dl)).toEqual([]) // 占位/下载文件/.lrc 全部清理
@@ -203,12 +218,12 @@ describe('createApp runner 装配（T10 评审修复）', () => {
 
   it('I4: settingsSet 并发生效，新批次按新并发调度', async () => {
     const env = await makeEnv({ concurrency: 1, delayMs: 1500 })
-    env.app.enqueue([track('a'), track('b')], '320')
+    env.app.enqueue({ tracks: [track('a'), track('b')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 2)
     expect(env.events.peak).toBe(1) // 并发 1：活跃峰值 1
     env.app.settingsSet({ concurrency: 3 })
     expect(env.app.settingsGet().concurrency).toBe(3)
-    env.app.enqueue([track('c'), track('d')], '320')
+    env.app.enqueue({ tracks: [track('c'), track('d')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 4)
     expect(env.events.peak).toBe(2) // 新并发下两任务重叠
   })
@@ -216,11 +231,49 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   it('enqueue 同次入队同 id 去重（只启一个任务）', async () => {
     const env = await makeEnv()
     const t = track('z')
-    env.app.enqueue([t, { ...t, name: '同名副本' }], '320')
+    env.app.enqueue({ tracks: [t, { ...t, name: '同名副本' }], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 1)
     await new Promise((r) => setTimeout(r, 1600)) // 越过限速窗口，确认无第二个任务启动
     expect(env.events.failed).toBe(0)
     expect(env.events.start).toBe(1)
     expect(env.events.donePaths.length).toBe(1)
+  })
+
+  it('N1: netease 任务走网易云管线（直链→下载→标签→done）', async () => {
+    // lyricMode=embed：歌词内嵌 USLT（music-metadata 读回断言）；直链/歌词/详情全部走 mock 路由
+    const env = await makeEnv({ lyricMode: 'embed' })
+    env.app.enqueue({
+      tracks: [{ id: '123', name: '测试歌', artist: '测试手', album: '测试专', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(env.recorded).toEqual(['/ne.mp3']) // 命中本地 320 直链，仅一次下载请求
+
+    const files = fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))
+    expect(files.length).toBe(1)
+    const out = path.join(env.dl, files[0])
+    expect(fs.readFileSync(out).length).toBeGreaterThan(PAYLOAD.length) // 下载成功并经标签内嵌
+
+    const mm = await parseFile(out)
+    expect(mm.common.title).toBe('测试歌')
+    expect(mm.common.artist).toBe('测试手')
+    expect(mm.common.album).toBe('测试专')
+    expect(mm.common.date).toBe('2020-05-01') // publishTime 1588262400000 = 2020-05-01（北京时间 CST 零点）
+    expect(mm.common.lyrics?.[0]?.text).toContain('测试歌词') // USLT 内嵌
+  })
+
+  it('N2: netease 非法歌曲 ID → jobFailed 且无下载文件', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: 'not-a-number', name: '坏 ID', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.events.done).toBe(0)
+    // ID 校验在创建下载目录之前抛出 → 目录可能不存在；存在则必须为空
+    expect(fs.existsSync(env.dl) ? fs.readdirSync(env.dl) : []).toEqual([])
   })
 })

@@ -33,4 +33,11 @@ describe('download store', () => {
     s.onQueueEvent({ id: 'j1', source: 'qq', state: 'done', progress: 100, outputPath: '/x.mp3' } as any)
     expect(s.queue[0].state).toBe('done')
   })
+
+  it('netease source 的队列事件镜像', () => {
+    const s = useDownloadStore()
+    s.onQueueEvent({ id: 'n1', source: 'netease', state: 'running', progress: 0, track: { name: 'N', artist: 'A' } })
+    expect(s.queue[0].source).toBe('netease')
+    expect(s.queue[0].name).toBe('N')
+  })
 })

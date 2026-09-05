@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, TrackDTO } from './qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, TrackDTO, Quality } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
@@ -42,88 +42,25 @@ export function createApp(deps: AppDeps) {
 
   const emitEvent = deps.emitEvent ?? (() => {})
 
-  const queue = new DownloadQueue({
-    concurrency: settings.concurrency,
-    rateLimiter: new RateLimiter(1000),
-    runner: async (job, report) => {
-      if (job.source === 'netease') return runNeteaseJob(job, report)
-      // 1) 直链（约 20 分钟过期；下载失败重取一次）
-      const resolveOnce = async (q: typeof job.quality) => getAudioUrl(client, job.track.id, job.track.mediaMid, q)
-      const first = await resolveOnce(job.quality)
-      if (first.downgraded) job.downgraded = true
-      // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
-      //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
-      const ext = QUALITY_MAP[first.quality].ext
-      const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
-      let dest = uniquePath(path.join(settings.downloadDir, `${name}.${ext}`))
-      fs.mkdirSync(settings.downloadDir, { recursive: true })
-      while (true) {
-        try {
-          const fd = fs.openSync(dest, 'wx')
-          fs.closeSync(fd)
-          break
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
-          dest = uniquePath(dest)
-        }
-      }
-      const doDownload = (url: string, destPath: string) => downloadFile(url, destPath, {
-        retries: 2,
-        onProgress: (got, total) => {
-          report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
-        },
-      })
-      try {
-        await doDownload(first.url, dest)
-      } catch (err) {
-        // catch-all 重取直链重下（标签步骤在块外，无掩盖调用方错误的风险）；
-        // 失败清理占位文件，避免 .part 并发碰撞后的废文件堆积
-        fs.rmSync(dest, { force: true })
-        const fresh = await resolveOnce(job.quality)
-        if (fresh.downgraded) job.downgraded = true
-        await doDownload(fresh.url, dest)
-      }
-      // 3) 标签（歌词内嵌/另存受 settings.lyricMode 控制：both=内嵌+另存、embed=仅内嵌、
-      //    lrc=仅另存、none=不保存——tagFile 的 saveLrc 参数已有区分；歌词接口失败返回空串不阻塞）；
-      //    失败时清理已下载文件（含 .lrc）防堆积
-      try {
-        const detail = await getTrackDetail(client, job.track.id)
-        const cover = await fetchCover(job.track.cover, fetchImpl)
-        const meta = {
-          title: job.track.name,
-          artist: job.track.artist,
-          album: job.track.album || '未知专辑',
-          date: detail.date,
-          copyright: '',
-          genre: '',
-          lyrics: settings.lyricMode !== 'none' ? await fetchLyric(client, job.track.id) : '',
-          cover: cover?.data,
-          coverMime: cover?.mime,
-        }
-        await tagFile(dest, meta, { saveLrc: settings.lyricMode === 'both' || settings.lyricMode === 'lrc' })
-      } catch (e) {
-        fs.rmSync(dest, { force: true })
-        fs.rmSync(dest.replace(/\.(mp3|flac|ape|m4a)$/i, '.lrc'), { force: true })
-        throw e
-      }
-      return { outputPath: dest }
+  // 共享下载骨架（QQ/网易云 runner 共同）：直链→占位→下载(失败重取一次)→标签→清理。
+  // 两源差异仅三个参数化点：直链解析 resolveOnce、扩展名 extFor、元数据 fetchDetail/fetchLyrics；
+  // ID 校验等前置守卫由各 wrapper 负责（如网易云的非数值 id 拒下载）。
+  async function runDownloadJob(
+    job: DownloadJob,
+    report: (pct: number) => void,
+    spec: {
+      resolveOnce: (q: Quality) => Promise<{ url: string; quality: Quality; downgraded: boolean }>
+      extFor: (q: Quality) => string
+      fetchDetail: () => Promise<{ date: string }>
+      fetchLyrics: () => Promise<string>
     },
-  })
-
-  // 队列事件 → 渲染器（浅拷贝快照，避免活引用语义陷阱）
-  queue.on('jobStart', (j) => emitEvent('dl:jobStart', { ...j }))
-  queue.on('jobProgress', (j) => emitEvent('dl:progress', { ...j }))
-  queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))
-  queue.on('jobFailed', (j) => emitEvent('dl:failed', { ...j }))
-
-  // 网易云 runner（与 QQ runner 同构：占位→下载→重取→标签→清理；直链约 20 分钟过期）
-  const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void): Promise<{ outputPath?: string } | void> => {
-    // 1) 直链（br 逐档降级；下载失败重取一次）
-    const resolveOnce = async (q: typeof job.quality) => neGetAudioUrl(neClient, Number(job.track.id), q)
-    const first = await resolveOnce(job.quality)
+  ): Promise<{ outputPath: string }> {
+    // 1) 直链（约 20 分钟过期；下载失败重取一次）
+    const first = await spec.resolveOnce(job.quality)
     if (first.downgraded) job.downgraded = true
-    // 2) 下载（原子占位防并发撞名；同 QQ：wx 创建，EEXIST 则换后缀重试）
-    const ext = first.quality === 'flac' ? 'flac' : 'mp3'
+    // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
+    //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
+    const ext = spec.extFor(first.quality)
     const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
     let dest = uniquePath(path.join(settings.downloadDir, `${name}.${ext}`))
     fs.mkdirSync(settings.downloadDir, { recursive: true })
@@ -145,17 +82,19 @@ export function createApp(deps: AppDeps) {
     })
     try {
       await doDownload(first.url, dest)
-    } catch (err) {
-      // 失败清理占位文件后重取直链重下（同 QQ；标签步骤在块外，无掩盖调用方错误的风险）
+    } catch {
+      // catch-all 重取直链重下（标签步骤在块外，无掩盖调用方错误的风险）；
+      // 失败清理占位文件，避免 .part 并发碰撞后的废文件堆积
       fs.rmSync(dest, { force: true })
-      const fresh = await resolveOnce(job.quality)
+      const fresh = await spec.resolveOnce(job.quality)
       if (fresh.downgraded) job.downgraded = true
       await doDownload(fresh.url, dest)
     }
-    // 3) 标签（歌词保存受 settings.lyricMode 控制；歌词接口失败返回空串不阻塞；
-    //    失败时清理已下载文件（含 .lrc）防堆积）
+    // 3) 标签（歌词内嵌/另存受 settings.lyricMode 控制：both=内嵌+另存、embed=仅内嵌、
+    //    lrc=仅另存、none=不保存——tagFile 的 saveLrc 参数已有区分；歌词接口失败返回空串不阻塞）；
+    //    失败时清理已下载文件（含 .lrc）防堆积
     try {
-      const detail = await neGetTrackDetail(neClient, Number(job.track.id))
+      const detail = await spec.fetchDetail()
       const cover = await fetchCover(job.track.cover, fetchImpl)
       const meta = {
         title: job.track.name,
@@ -164,7 +103,7 @@ export function createApp(deps: AppDeps) {
         date: detail.date,
         copyright: '',
         genre: '',
-        lyrics: settings.lyricMode !== 'none' ? await neFetchLyric(neClient, Number(job.track.id)) : '',
+        lyrics: settings.lyricMode !== 'none' ? await spec.fetchLyrics() : '',
         cover: cover?.data,
         coverMime: cover?.mime,
       }
@@ -175,6 +114,40 @@ export function createApp(deps: AppDeps) {
       throw e
     }
     return { outputPath: dest }
+  }
+
+  const queue = new DownloadQueue({
+    concurrency: settings.concurrency,
+    rateLimiter: new RateLimiter(1000),
+    runner: async (job, report) => {
+      // 按 source 选 wrapper：一个参数化点集合 = 一条管线（QQ / 网易云）
+      if (job.source === 'netease') return runNeteaseJob(job, report)
+      return runDownloadJob(job, report, {
+        resolveOnce: (q) => getAudioUrl(client, job.track.id, job.track.mediaMid, q),
+        extFor: (q) => QUALITY_MAP[q].ext,
+        fetchDetail: () => getTrackDetail(client, job.track.id),
+        fetchLyrics: () => fetchLyric(client, job.track.id),
+      })
+    },
+  })
+
+  // 队列事件 → 渲染器（浅拷贝快照，避免活引用语义陷阱）
+  queue.on('jobStart', (j) => emitEvent('dl:jobStart', { ...j }))
+  queue.on('jobProgress', (j) => emitEvent('dl:progress', { ...j }))
+  queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))
+  queue.on('jobFailed', (j) => emitEvent('dl:failed', { ...j }))
+
+  // 网易云 wrapper：ID 校验（netease 接口以数值 id 查询，非数值直接失败，不进下载），
+  // 其余差异仅三个参数化点（直链 br 逐档降级 / 扩展名 / 元数据），复用共享骨架
+  const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void): Promise<{ outputPath?: string } | void> => {
+    const id = Number(job.track.id)
+    if (!Number.isFinite(id)) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
+    return runDownloadJob(job, report, {
+      resolveOnce: (q) => neGetAudioUrl(neClient, id, q),
+      extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
+      fetchDetail: () => neGetTrackDetail(neClient, id),
+      fetchLyrics: () => neFetchLyric(neClient, id),
+    })
   }
 
   return {
@@ -193,20 +166,22 @@ export function createApp(deps: AppDeps) {
       if (kind.kind === 'album') return { kind, tracks: await fetchAlbum(client, kind.id) }
       return null
     },
-    enqueue: (tracks: TrackDTO[], quality: Settings['quality']) => {
+    enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; source: 'qq' | 'netease' }) => {
+      const { tracks, quality, source } = payload
       // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
-      const jobs = tracks
-        .filter((t) => {
-          if (seen.has(t.id)) return false
-          seen.add(t.id)
-          return true
-        })
-        .map((t) => ({
-          id: t.id, source: 'qq' as const, track: t, quality, state: 'queued' as const, progress: 0,
-        }))
-      queue.enqueue(jobs)
+      queue.enqueue(
+        tracks
+          .filter((t) => {
+            if (seen.has(t.id)) return false
+            seen.add(t.id)
+            return true
+          })
+          .map((t) => ({
+            id: t.id, source, track: t, quality, state: 'queued' as const, progress: 0,
+          })),
+      )
       return true
     },
     settingsGet: () => settings,
