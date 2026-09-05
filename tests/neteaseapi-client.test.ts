@@ -28,7 +28,13 @@ describe('createNeClient', () => {
     await expect(client.getJson('https://music.163.com/api/x')).rejects.toThrow(/rate/i)
   })
 
-  it('非 JSON 抛 QqApiError；网络错误重试后成功', async () => {
+  it('非 JSON 响应抛 QqApiError', async () => {
+    const fetchMock = jsonFetch('<html>error</html>')
+    const client = createNeClient(fetchMock)
+    await expect(client.getJson('https://music.163.com/api/x')).rejects.toThrow(QqApiError)
+  })
+
+  it('网络错误重试后成功', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError('fetch failed'))
       .mockResolvedValueOnce(new Response('{"ok":true}'))
