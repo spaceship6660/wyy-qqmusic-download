@@ -57,7 +57,8 @@ export async function neGetTrackDetail(client: NeClient, id: number): Promise<Ne
     const t = json?.songs?.[0]
     const ms = t?.album?.publishTime
     if (typeof ms === 'number' && ms > 0) {
-      return { date: new Date(ms).toISOString().slice(0, 10) }
+      // publishTime 为北京时间零点（中国发行日期）；UTC 转换会差一天，故先补偿 +8h
+      return { date: new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10) }
     }
     return { date: '' }
   } catch {

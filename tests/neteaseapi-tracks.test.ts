@@ -73,9 +73,11 @@ describe('nePlaylistDetail', () => {
 })
 
 describe('neGetTrackDetail', () => {
-  it('song/detail 取 date（YYYY-MM-DD）', async () => {
+  it('song/detail 取 date（YYYY-MM-DD，北京时间）', async () => {
     const client = createNeClient(routedFetch())
     const d = await neGetTrackDetail(client, 103027)
-    expect(d.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    // publishTime 1588262400000 = 2020-05-01T00:00+08:00（CST 零点，中国发行日期）
+    // 回归锚：若退回 UTC 转换（toISOString 不补偿），必得 2020-04-30 而失败
+    expect(d.date).toBe('2020-05-01')
   })
 })
