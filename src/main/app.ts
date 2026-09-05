@@ -4,7 +4,12 @@ import { createQqClient } from './qqapi/client'
 import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, TrackDTO } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { createAuth } from './auth'
-import { DownloadQueue } from './downloader/queue'
+import { createNeClient } from './neteaseapi/client'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount } from './neteaseapi/tracks'
+import { neFetchLyric } from './neteaseapi/lyric'
+import { neGetAudioUrl } from './neteaseapi/urls'
+import { createNeAuth } from './neteaseAuth'
+import { DownloadQueue, DownloadJob } from './downloader/queue'
 import { RateLimiter } from './downloader/ratelimit'
 import { downloadFile } from './downloader/file'
 import { tagFile } from './tagger'
@@ -29,6 +34,10 @@ export function createApp(deps: AppDeps) {
   const fetchImpl = deps.fetchImpl ?? fetch
   const client = createQqClient(fetchImpl, { uin: '0' })
   const auth = createAuth({ qqClient: client, fetchImpl, cookiePath: cookieFile })
+  const neClient = createNeClient(fetchImpl)
+  const neAuth = createNeAuth({ cookiePath: path.join(deps.userDataDir, 'netease_cookie.json') })
+  const savedNe = neAuth.getCookie()
+  if (savedNe) neClient.setCookie(savedNe)
   let settings = loadSettings(settingsFile)
 
   const emitEvent = deps.emitEvent ?? (() => {})
@@ -37,6 +46,7 @@ export function createApp(deps: AppDeps) {
     concurrency: settings.concurrency,
     rateLimiter: new RateLimiter(1000),
     runner: async (job, report) => {
+      if (job.source === 'netease') return runNeteaseJob(job, report)
       // 1) 直链（约 20 分钟过期；下载失败重取一次）
       const resolveOnce = async (q: typeof job.quality) => getAudioUrl(client, job.track.id, job.track.mediaMid, q)
       const first = await resolveOnce(job.quality)
@@ -106,6 +116,67 @@ export function createApp(deps: AppDeps) {
   queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))
   queue.on('jobFailed', (j) => emitEvent('dl:failed', { ...j }))
 
+  // 网易云 runner（与 QQ runner 同构：占位→下载→重取→标签→清理；直链约 20 分钟过期）
+  const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void): Promise<{ outputPath?: string } | void> => {
+    // 1) 直链（br 逐档降级；下载失败重取一次）
+    const resolveOnce = async (q: typeof job.quality) => neGetAudioUrl(neClient, Number(job.track.id), q)
+    const first = await resolveOnce(job.quality)
+    if (first.downgraded) job.downgraded = true
+    // 2) 下载（原子占位防并发撞名；同 QQ：wx 创建，EEXIST 则换后缀重试）
+    const ext = first.quality === 'flac' ? 'flac' : 'mp3'
+    const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
+    let dest = uniquePath(path.join(settings.downloadDir, `${name}.${ext}`))
+    fs.mkdirSync(settings.downloadDir, { recursive: true })
+    while (true) {
+      try {
+        const fd = fs.openSync(dest, 'wx')
+        fs.closeSync(fd)
+        break
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+        dest = uniquePath(dest)
+      }
+    }
+    const doDownload = (url: string, destPath: string) => downloadFile(url, destPath, {
+      retries: 2,
+      onProgress: (got, total) => {
+        report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
+      },
+    })
+    try {
+      await doDownload(first.url, dest)
+    } catch (err) {
+      // 失败清理占位文件后重取直链重下（同 QQ；标签步骤在块外，无掩盖调用方错误的风险）
+      fs.rmSync(dest, { force: true })
+      const fresh = await resolveOnce(job.quality)
+      if (fresh.downgraded) job.downgraded = true
+      await doDownload(fresh.url, dest)
+    }
+    // 3) 标签（歌词保存受 settings.lyricMode 控制；歌词接口失败返回空串不阻塞；
+    //    失败时清理已下载文件（含 .lrc）防堆积）
+    try {
+      const detail = await neGetTrackDetail(neClient, Number(job.track.id))
+      const cover = await fetchCover(job.track.cover, fetchImpl)
+      const meta = {
+        title: job.track.name,
+        artist: job.track.artist,
+        album: job.track.album || '未知专辑',
+        date: detail.date,
+        copyright: '',
+        genre: '',
+        lyrics: settings.lyricMode !== 'none' ? await neFetchLyric(neClient, Number(job.track.id)) : '',
+        cover: cover?.data,
+        coverMime: cover?.mime,
+      }
+      await tagFile(dest, meta, { saveLrc: settings.lyricMode === 'both' || settings.lyricMode === 'lrc' })
+    } catch (e) {
+      fs.rmSync(dest, { force: true })
+      fs.rmSync(dest.replace(/\.(mp3|flac|ape|m4a)$/i, '.lrc'), { force: true })
+      throw e
+    }
+    return { outputPath: dest }
+  }
+
   return {
     search: (q: string) => searchTracks(client, q),
     parseLink: async (url: string) => {
@@ -152,6 +223,24 @@ export function createApp(deps: AppDeps) {
     authStatus: () => {
       const s = auth.getStatus()
       return { loggedIn: s.state === 'loggedIn', uin: s.uin }
+    },
+    neSearch: (q: string) => neSearch(neClient, q),
+    neAccount: () => neAccount(neClient),
+    nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
+    nePlaylist: (id: string) => nePlaylistDetail(neClient, id),
+    neAuthImport: (header: string) => {
+      const ok = neAuth.importCookie(header)
+      if (ok) neClient.setCookie(header)
+      return ok
+    },
+    neAuthStatus: () => neAuth.getStatus(),
+    neAuthClear: () => {
+      neAuth.clear()
+      neClient.setCookie('')
+    },
+    neAuthSaveFromWindow: (header: string) => {
+      neAuth.saveCookie(header)
+      neClient.setCookie(header)
     },
   }
 }

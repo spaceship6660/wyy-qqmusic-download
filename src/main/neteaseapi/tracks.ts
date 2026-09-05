@@ -65,3 +65,18 @@ export async function neGetTrackDetail(client: NeClient, id: number): Promise<Ne
     return { date: '' }
   }
 }
+
+export type NeAccount = { uid: number; nickname: string } | null
+/** 登录态取 uid/昵称（api/nuser/account/get，需 MUSIC_U cookie）；未登录/异常返回 null */
+export async function neAccount(client: NeClient): Promise<NeAccount | null> {
+  try {
+    const json = await client.getJson<{ profile?: { userId?: number; nickname?: string } }>(
+      'https://music.163.com/api/nuser/account/get',
+    )
+    const p = json?.profile
+    if (p?.userId) return { uid: p.userId, nickname: p.nickname ?? '' }
+    return null
+  } catch {
+    return null
+  }
+}

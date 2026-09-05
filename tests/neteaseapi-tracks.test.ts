@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createNeClient } from '../src/main/neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto } from '../src/main/neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccount } from '../src/main/neteaseapi/tracks'
 
 const fx = (n: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'netease', n), 'utf-8')
 
@@ -15,6 +15,7 @@ function routedFetch(): typeof fetch {
       return url.includes('id=ANON') ? new Response(fx('playlist-anon.json')) : new Response(fx('playlist-full.json'))
     }
     if (url.includes('/api/song/detail')) return new Response(fx('song-detail.json'))
+    if (url.includes('/api/nuser/account/get')) return new Response(fx('account.json'))
     return new Response('{}', { status: 404 })
   }) as unknown as typeof fetch
 }
@@ -79,5 +80,26 @@ describe('neGetTrackDetail', () => {
     // publishTime 1588262400000 = 2020-05-01T00:00+08:00（CST 零点，中国发行日期）
     // 回归锚：若退回 UTC 转换（toISOString 不补偿），必得 2020-04-30 而失败
     expect(d.date).toBe('2020-05-01')
+  })
+})
+
+describe('neAccount', () => {
+  it('登录态取 uid/昵称；无 profile 返回 null', async () => {
+    const client = createNeClient(routedFetch())
+    const acc = await neAccount(client)
+    expect(acc?.uid).toBe(1597610302)
+    expect(acc?.nickname).toBeTruthy()
+  })
+  it('无 profile（未登录/风控）返回 null', async () => {
+    const client = createNeClient(routedFetch())
+    const plain = createNeClient((async (input: any) => {
+      const url = String(input)
+      return new Response(url.includes('/api/nuser/account/get') ? '{"code":301}' : '{}', { status: 200 })
+    }) as unknown as typeof fetch)
+    expect(await neAccount(client)).not.toBeNull()
+    expect(await neAccount(plain)).toBeNull()
+    // 接口异常（非 JSON/网络错误）也按未登录容错
+    const broken = createNeClient((async () => { throw new Error('net') }) as unknown as typeof fetch)
+    expect(await neAccount(broken)).toBeNull()
   })
 })
