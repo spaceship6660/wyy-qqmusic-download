@@ -89,7 +89,12 @@ export function createAuth(options: AuthOptions): Auth {
   let cookieJar = ''
   // ptqrlogin 返回 0 成功时的第三段 URL（参考自 Spica qqmusic.py:390）
   let checkSigUrl = ''
-  let sessionState: AuthState = readCookieFile() ? 'loggedIn' : 'anonymous'
+  // T12 冒烟发现：此前只恢复登录状态（sessionState=loggedIn），未把持久化 cookie 应用回
+  // qqClient——重启后 UI 显示已登录但请求仍是匿名（vkey 空 purl 拿不到直链）。
+  // 创建时若有凭证，状态与 client 请求凭证一并恢复；clear() 时同步匿名化。
+  const savedCookie = readCookieFile()
+  let sessionState: AuthState = savedCookie ? 'loggedIn' : 'anonymous'
+  if (savedCookie) qqClient.setAuth(savedCookie)
   let lastError = ''
 
   function getCookie(name: string): string {

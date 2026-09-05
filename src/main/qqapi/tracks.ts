@@ -143,3 +143,20 @@ export async function fetchAlbum(client: QqClient, mid: string): Promise<TrackDT
   const list = (data?.list ?? []) as any[]
   return list.map((e) => trackFromEntry(e, data?.name ?? ''))
 }
+
+/** 歌词：PlayLyricInfo 返回 base64 的 LRC；失败/缺失一律返回空串（不阻塞下载） */
+export async function fetchLyric(client: QqClient, mid: string): Promise<string> {
+  try {
+    const data = (await client.postMusicu({
+      req_2: {
+        module: 'music.musichallSong.PlayLyricInfo',
+        method: 'GetPlayLyricInfo',
+        param: { songMID: mid },
+      },
+    }, { path: ['req_2', 'data'] })) as { lyric?: string }
+    if (!data?.lyric) return ''
+    return Buffer.from(data.lyric, 'base64').toString('utf-8')
+  } catch {
+    return ''
+  }
+}

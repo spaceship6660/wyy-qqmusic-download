@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, TrackDTO } from './qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, TrackDTO } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { createAuth } from './auth'
 import { DownloadQueue } from './downloader/queue'
@@ -73,7 +73,9 @@ export function createApp(deps: AppDeps) {
         if (fresh.downgraded) job.downgraded = true
         await doDownload(fresh.url, dest)
       }
-      // 3) 标签（T12 接入歌词前 lyrics 为空串）；失败时清理已下载文件（含 .lrc）防堆积
+      // 3) 标签（歌词内嵌/另存受 settings.lyricMode 控制：both=内嵌+另存、embed=仅内嵌、
+      //    lrc=仅另存、none=不保存——tagFile 的 saveLrc 参数已有区分；歌词接口失败返回空串不阻塞）；
+      //    失败时清理已下载文件（含 .lrc）防堆积
       try {
         const detail = await getTrackDetail(client, job.track.id)
         const cover = await fetchCover(job.track.cover, fetchImpl)
@@ -84,7 +86,7 @@ export function createApp(deps: AppDeps) {
           date: detail.date,
           copyright: '',
           genre: '',
-          lyrics: settings.lyricMode !== 'none' ? '' : '',   // T12 接入 fetchLyric
+          lyrics: settings.lyricMode !== 'none' ? await fetchLyric(client, job.track.id) : '',
           cover: cover?.data,
           coverMime: cover?.mime,
         }

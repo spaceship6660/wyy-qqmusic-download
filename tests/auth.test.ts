@@ -328,6 +328,29 @@ describe('createAuth', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('重启恢复：cookie 文件存在时创建即登录态，client 同步带上 cookie（T12 冒烟发现：此前只恢复状态未恢复请求凭证）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-rst-'))
+    const cookiePath = path.join(dir, 'cookie.json')
+    fs.writeFileSync(
+      cookiePath,
+      JSON.stringify({ uin: 'o9876', cookie: 'uin=o9876; qqmusic_uin=o9876; qm_keyst=K; qqmusic_key=KEY123' }),
+    )
+    const fetchMock = routerFetch({ login: () => "ptuiCB('66','x','')" })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const auth = createAuth({ qqClient: client, fetchImpl: fetchMock, cookiePath })
+
+    expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o9876' })
+
+    // 重启后立刻下载：postMusicu 请求必须携带恢复的 cookie（否则 vkey 空 purl 拿不到直链）
+    await client.postMusicu({ req: { module: 'x', method: 'y', param: {} } }, { path: [] })
+    const [url, init] = (fetchMock as any).mock.calls[0]
+    expect(String(url)).toContain('musicu.fcg')
+    expect((init as RequestInit).headers as Record<string, string>).toMatchObject({
+      cookie: expect.stringContaining('qqmusic_key=KEY123'),
+    })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('网络错误（fetch 抛错）：waitForResult → ok:false、状态 failed', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-nerr-'))
     const fetchMock = vi.fn(async (input: unknown) => {
