@@ -8,20 +8,26 @@ const job = (id: string, source: 'qq' | 'netease' = 'qq'): DownloadJob => ({
 
 describe('DownloadQueue', () => {
   it('按并发数执行并依次完成', async () => {
+    let active = 0
+    let peak = 0
     const order: string[] = []
     const q = new DownloadQueue({
       concurrency: 2,
       rateLimiter: { wait: async () => {} } as any,
       runner: async (j) => {
+        active++
+        peak = Math.max(peak, active)
         order.push(j.track.id)
         await new Promise((r) => setTimeout(r, 20))
+        active--
       },
     })
     const done = vi.fn()
     q.on('jobDone', done)
     q.enqueue([job('a'), job('b'), job('c'), job('d')])
-    await q.waitIdle(5000)
+    await q.waitIdle(1000)
     expect(order.length).toBe(4)
+    expect(peak).toBe(2)
     expect(done).toHaveBeenCalledTimes(4)
   })
 
@@ -32,23 +38,33 @@ describe('DownloadQueue', () => {
       runner: async (j) => { if (j.track.id === 'bad') throw new Error('炸了') },
     })
     const failed = vi.fn()
+    const done = vi.fn()
     q.on('jobFailed', failed)
+    q.on('jobDone', done)
     q.enqueue([job('bad'), job('ok')])
     await q.waitIdle(5000)
     expect(failed).toHaveBeenCalledTimes(1)
     expect((failed.mock.calls[0][0] as DownloadJob).error).toBe('炸了')
+    expect(done).toHaveBeenCalledTimes(1)
+    expect((done.mock.calls[0][0] as DownloadJob).id).toBe('ok')
+    expect((done.mock.calls[0][0] as DownloadJob).state).toBe('done')
   })
 
   it('runner 前先过限速器', async () => {
-    const waits: number[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const runCount = vi.fn()
     const q = new DownloadQueue({
       concurrency: 3,
-      rateLimiter: { wait: async () => { waits.push(Date.now()) } } as any,
-      runner: async () => {},
+      rateLimiter: { wait: async () => { await gate } } as any,
+      runner: async () => { runCount() },
     })
     q.enqueue([job('x1'), job('x2')])
-    await q.waitIdle(3000)
-    expect(waits.length).toBe(2)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(runCount).toHaveBeenCalledTimes(0)
+    release()
+    await q.waitIdle(1000)
+    expect(runCount).toHaveBeenCalledTimes(2)
   })
 
   it('source 透传给 runner', async () => {

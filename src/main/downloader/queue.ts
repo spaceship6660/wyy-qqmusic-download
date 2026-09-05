@@ -48,19 +48,25 @@ export class DownloadQueue extends EventEmitter {
   }
 
   private async runJob(job: DownloadJob): Promise<void> {
-    job.state = 'running'
-    this.emit('jobStart', job)
+    let finished = false
     try {
+      job.state = 'running'
+      this.emit('jobStart', job)
       await this.deps.rateLimiter.wait()
       const { outputPath } = (await this.deps.runner(job, (pct) => {
-        job.progress = pct
-        this.emit('jobProgress', job)
+        if (finished) return
+        if (pct !== job.progress) {
+          job.progress = pct
+          this.emit('jobProgress', job)
+        }
       })) ?? {}
+      finished = true
       job.state = 'done'
       job.progress = 100
       job.outputPath = outputPath
       this.emit('jobDone', job)
     } catch (err) {
+      finished = true
       job.state = 'failed'
       job.error = err instanceof Error ? err.message : String(err)
       this.emit('jobFailed', job)

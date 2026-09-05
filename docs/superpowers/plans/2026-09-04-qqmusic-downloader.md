@@ -1346,8 +1346,8 @@ git add src/main/auth.ts tests/auth.test.ts && git commit -m "feat: ptlogin2 扫
 import { describe, it, expect, vi } from 'vitest'
 import { DownloadQueue, DownloadJob } from '../src/main/downloader/queue'
 
-const job = (id: string): DownloadJob => ({
-  id, track: { id, name: `歌曲${id}`, artist: '测试' , album: '', cover: '' }, quality: '320',
+const job = (id: string, source: 'qq' | 'netease' = 'qq'): DownloadJob => ({
+  id, source, track: { id, name: `歌曲${id}`, artist: '测试' , album: '', cover: '' }, quality: '320',
   state: 'queued', progress: 0,
 })
 
@@ -1415,6 +1415,7 @@ export type JobState = 'queued' | 'running' | 'done' | 'failed'
 
 export interface DownloadJob {
   id: string
+  source: 'qq' | 'netease'   // P2 网易云复用契约：runner 按 source 选直链层
   track: TrackDTO
   quality: Quality
   state: JobState
@@ -2094,7 +2095,7 @@ export function createApp(deps: AppDeps) {
       settings.quality = quality
       saveSettings(settingsFile, settings)
       queue.enqueue(tracks.map((t) => ({
-        id: t.id, track: t, quality, state: 'queued' as const, progress: 0,
+        id: t.id, source: 'qq' as const, track: t, quality, state: 'queued' as const, progress: 0,
       })))
       return true
     },
@@ -2151,6 +2152,8 @@ ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult
 ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
 ipcMain.handle('auth:status', () => appInstance.authStatus())
 ```
+
+> 注意：队列事件（`jobStart` / `jobProgress` / `jobDone` / `jobFailed`）需要转发到渲染器——监听 queue 事件后经 `webContents.send` 分别发 `dl:jobStart` / `dl:progress` / `dl:done` / `dl:failed` 通道；转发时对 job 做浅拷贝快照（`{ ...job }`），避免渲染器持有活引用、被后续事件改动造成语义陷阱。
 
 （渲染器 `window.api.invoke` 已透传，无需改 preload。登录 IPC 通道：`auth:startQr` / `auth:poll` / `auth:waitResult` / `auth:importCookie` / `auth:status`。渲染器流程：`auth:startQr` → 展示二维码 → 循环 `auth:poll`（显示 66 waiting / 67 scanned）→ 收到 `'success'` 后调 `auth:waitResult(timeoutMs)` 完成 check_sig→authorize→QQLogin→落盘；扫码登录完成或失败后进入终态（loggedIn/failed），此时再调 `auth:poll` 会抛「当前无进行中的扫码会话」，UI 收到该错误即停止轮询。）
 
