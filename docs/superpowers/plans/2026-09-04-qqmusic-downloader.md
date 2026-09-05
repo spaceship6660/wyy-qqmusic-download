@@ -1238,9 +1238,9 @@ describe('createAuth', () => {
 
     const qr = await auth.startQr()
     expect(qr.qrDataUrl.startsWith('data:image/png;base64,')).toBe(true)
-    expect(auth.pollStatus()).toBe('waiting')
+    expect(auth.poll()).toBe('waiting')
 
-    const result = await auth.waitForQrResult(3000)
+    const result = await auth.waitForResult(3000)
     expect(result.ok).toBe(true)
     const saved = JSON.parse(fs.readFileSync(path.join(dir, 'cookie.json'), 'utf-8'))
     expect(saved.uin).toBe('o987654321')
@@ -1282,7 +1282,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { QqClient } from './qqapi/client'
 
-export interface QrSession { qrDataUrl: string; qrsig: string; ptqrtoken: number }
+export interface QrSession { qrDataUrl: string } // data:image/png;base64,...
 
 export interface AuthStatus { state: 'anonymous' | 'waiting' | 'loggedIn' | 'failed'; uin?: string; error?: string }
 
@@ -1313,7 +1313,7 @@ const PTQR_LOGIN = 'https://ssl.ptlogin2.qq.com/ptqrlogin'
 // - 持久化:    JSON { uin: "o{musicid}", cookie: "完整 Cookie 头" } 写入 cookiePath，并调 qqClient.setAuth
 ```
 
-（移植时保持本文件每个函数带 Spica 行号注释；`waitForQrResult(ms)` 内部以 500ms 间隔轮询 `ptqrlogin`，状态 67→66 循环，0→走 check_sig/authorize/QQLogin，65→failed「二维码已失效」，超时→failed。）
+（移植时保持本文件每个函数带 Spica 行号注释；`waitForResult(ms)` 内部以 500ms 间隔轮询 `ptqrlogin`，状态 67→66 循环，0→走 check_sig/authorize/QQLogin，65→failed「二维码已失效」，超时→failed。）
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2105,7 +2105,8 @@ export function createApp(deps: AppDeps) {
       return settings
     },
     authStartQr: () => auth.startQr(),
-    authPoll: () => auth.pollStatus(),
+    authPoll: () => auth.poll(),
+    authWaitResult: (ms: number) => auth.waitForResult(ms),
     authImportCookie: (cookie: string) => auth.importCookie(cookie),
     authStatus: () => ({ loggedIn: auth.getStatus().state === 'loggedIn', uin: auth.getStatus().uin }),
   }
@@ -2146,11 +2147,12 @@ ipcMain.handle('settings:get', () => appInstance.settingsGet())
 ipcMain.handle('settings:set', (_e, patch: unknown) => appInstance.settingsSet(patch as any))
 ipcMain.handle('auth:startQr', () => appInstance.authStartQr())
 ipcMain.handle('auth:poll', () => appInstance.authPoll())
+ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult(ms))
 ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
 ipcMain.handle('auth:status', () => appInstance.authStatus())
 ```
 
-（渲染器 `window.api.invoke` 已透传，无需改 preload。）
+（渲染器 `window.api.invoke` 已透传，无需改 preload。登录 IPC 通道：`auth:startQr` / `auth:poll` / `auth:waitResult` / `auth:importCookie` / `auth:status`。渲染器流程：`auth:startQr` → 展示二维码 → 循环 `auth:poll`（显示 66 waiting / 67 scanned）→ 收到 `'success'` 后调 `auth:waitResult(timeoutMs)` 完成 check_sig→authorize→QQLogin→落盘；扫码登录完成或失败后进入终态（loggedIn/failed），此时再调 `auth:poll` 会抛「当前无进行中的扫码会话」，UI 收到该错误即停止轮询。）
 
 - [ ] **Step 4: 跑测试并冒烟**
 
@@ -2252,7 +2254,7 @@ export const useDownloadStore = defineStore('download', {
 `SearchBar.vue` —— 输入框 + 搜索按钮 + 粘贴链接提示；emit `search(query)`。
 `TrackGrid.vue` —— props: tracks/selectedIds; emit `toggle(id)`、`selectAll`、`clear`；每张卡片显示封面缩略图（`cover` URL）、名称、歌手、VIP 角标（vip 为 true 显示「VIP」）、勾选框。
 `QueuePanel.vue` —— props: queue；显示每项状态/进度条/错误。
-`LoginButton.vue` —— 显示当前状态；未登录点击调 `api.invoke('auth:startQr')` 弹出二维码（新窗口内嵌 img），轮询 `auth:poll`；也提供手动 cookie 输入（`auth:importCookie`）。
+`LoginButton.vue` —— 显示当前状态；未登录点击调 `api.invoke('auth:startQr')` 弹出二维码（新窗口内嵌 img），循环 `auth:poll`（展示 66/67 状态），收到 `'success'` 后调 `auth:waitResult(timeoutMs)` 完成登录闭环，终态后 poll 抛错即停止轮询；也提供手动 cookie 输入（`auth:importCookie`）。
 `SettingsPanel.vue` —— 码率/并发/下载目录（文件选择用 `<input type="file" webkitdirectory>` 取路径或手动输入）/歌词模式单选；调 `settings:get/set`。
 
 `App.vue` 串起来（完整代码在实现时按上述 props/emit 接口写，保持三 Tab 结构与 Task 1 一致）。
