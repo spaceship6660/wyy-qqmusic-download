@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { useDownloadStore } from '../stores/download'
+
+const store = useDownloadStore()
 
 interface UiSettings {
   quality: 'flac' | 'ape' | '320' | '128' | 'm4a'
@@ -17,6 +20,7 @@ const settings = ref<UiSettings>({
 const loaded = ref(false)
 const dirNotice = ref('')
 let dirTimer: ReturnType<typeof setTimeout> | null = null
+let saveTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(async () => {
   try {
@@ -27,17 +31,19 @@ onMounted(async () => {
   }
   loaded.value = true
 })
-onUnmounted(() => { if (dirTimer) clearTimeout(dirTimer) })
+onUnmounted(() => {
+  if (dirTimer) clearTimeout(dirTimer)
+  if (saveTimer) clearTimeout(saveTimer)
+})
 
-/** 改动即保存（目录输入框防抖 400ms） */
+/** 改动即保存：目录输入走独立 dirTimer 防抖 400ms；其余设置走 saveTimer，互不清理对方的定时器 */
 function save(patch: Partial<UiSettings>, delay = 0): void {
-  const apply = () => void window.api.invoke('settings:set', patch)
-  if (dirTimer) { clearTimeout(dirTimer); dirTimer = null }
-  dirTimer = setTimeout(apply, delay)
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  saveTimer = setTimeout(() => { saveTimer = null; void window.api.invoke('settings:set', patch) }, delay)
 }
 
 function setQuality(q: UiSettings['quality']): void {
-  settings.value.quality = q
+  store.setQuality(q) // store 为展示/入队/持久化的单一事实源，再落盘
   save({ quality: q })
 }
 
@@ -48,7 +54,8 @@ function setConcurrency(n: number): void {
 
 function setDir(v: string): void {
   settings.value.downloadDir = v
-  save({ downloadDir: v }, 400)
+  if (dirTimer) { clearTimeout(dirTimer); dirTimer = null }
+  dirTimer = setTimeout(() => { dirTimer = null; void window.api.invoke('settings:set', { downloadDir: v }) }, 400)
 }
 
 function setLyricMode(m: UiSettings['lyricMode']): void {
@@ -56,19 +63,20 @@ function setLyricMode(m: UiSettings['lyricMode']): void {
   save({ lyricMode: m })
 }
 
-/** Electron 限制：webkitdirectory 拿不到绝对路径；有 File.path 就填上，否则提示手输 */
+/** Electron 限制：webkitdirectory 拿不到绝对路径；经 preload 的 webUtils.getPathForFile 取绝对路径 */
 function pickDir(e: Event): void {
   const input = e.target as HTMLInputElement
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
-  const candidate = (f as unknown as { path?: string }).path
-  if (typeof candidate === 'string' && candidate) {
+  const candidate = window.api.getPathForFile(f)
+  if (candidate) {
+    if (dirTimer) { clearTimeout(dirTimer); dirTimer = null } // 覆盖未落地的防抖输入
     settings.value.downloadDir = candidate
-    save({ downloadDir: candidate })
+    void window.api.invoke('settings:set', { downloadDir: candidate })
     dirNotice.value = '已选择下载目录'
   } else {
-    dirNotice.value = '当前 Electron 无法直接读取所选文件夹路径，请在输入框中手动粘贴完整路径'
+    dirNotice.value = '未能读取所选文件夹路径，请在输入框中手动粘贴完整路径'
   }
 }
 </script>
@@ -80,9 +88,9 @@ function pickDir(e: Event): void {
       <div class="field">
         <span class="label">码率</span>
         <div class="radios">
-          <label v-for="q in (['320', '128', 'm4a', 'flac'] as const)" :key="q">
-            <input type="radio" :value="q" :checked="settings.quality === q" @change="setQuality(q)" />
-            {{ q === '320' ? '320kbps MP3' : q === '128' ? '128kbps MP3' : q === 'm4a' ? 'm4a' : 'FLAC 无损' }}
+          <label v-for="q in (['320', '128', 'm4a', 'flac', 'ape'] as const)" :key="q">
+            <input type="radio" :value="q" :checked="store.quality === q" @change="setQuality(q)" />
+            {{ q === '320' ? '320kbps MP3' : q === '128' ? '128kbps MP3' : q === 'm4a' ? 'm4a' : q === 'ape' ? 'APE 无损' : 'FLAC 无损' }}
           </label>
         </div>
       </div>

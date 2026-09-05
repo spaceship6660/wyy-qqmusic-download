@@ -121,8 +121,7 @@ export function createApp(deps: AppDeps) {
       return null
     },
     enqueue: (tracks: TrackDTO[], quality: Settings['quality']) => {
-      settings.quality = quality
-      saveSettings(settingsFile, settings)
+      // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
       const jobs = tracks

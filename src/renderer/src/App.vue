@@ -16,7 +16,7 @@ async function doSearch(): Promise<void> {
   if (!text) return
   try {
     // 歌单/专辑/单曲链接 → 解析抓取；否则走搜索
-    if (/y\.qq\.com\/(n\/ryqq\/(songDetail|playlist|albumDetail)|music\.qq\.com)/.test(text)) {
+    if (/y\.qq\.com\/n\/ryqq\/(songDetail|playlist|albumDetail)/.test(text)) {
       const res: any = await window.api.invoke('qq:linkTracks', text)
       if (res?.tracks?.length) store.setTracks(res.tracks)
       else window.alert('未能解析该链接，请确认是 QQ 音乐歌单 / 专辑 / 单曲链接')
@@ -38,6 +38,8 @@ function enqueue(): void {
 
 onMounted(() => {
   void window.api.invoke('auth:status').then((s: any) => store.setLogin(!!s?.loggedIn, s?.uin ?? ''))
+  // 持久化码率 → store（store 是展示/入队的单一事实源，与磁盘初值对齐）
+  void window.api.invoke('settings:get').then((s: any) => { if (s?.quality) store.setQuality(s.quality) })
   window.api.on('dl:jobStart', store.onQueueEvent)
   window.api.on('dl:progress', store.onQueueEvent)
   window.api.on('dl:done', store.onQueueEvent)

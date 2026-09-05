@@ -19,6 +19,13 @@ describe('download store', () => {
     s.setQuality('flac'); expect(s.quality).toBe('flac')
   })
 
+  it('setQuality 联动契约：码率单一事实源（store 侧）', () => {
+    const s = useDownloadStore()
+    expect(s.quality).toBe('320')
+    s.setQuality('flac')
+    expect(s.quality).toBe('flac')
+  })
+
   it('队列事件镜像：jobStart/progress/done/failed 更新 queue 列表', () => {
     const s = useDownloadStore()
     s.onQueueEvent({ id: 'j1', source: 'qq', state: 'running', progress: 10 } as any)

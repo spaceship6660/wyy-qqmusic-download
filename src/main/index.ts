@@ -26,6 +26,7 @@ ipcMain.handle('auth:poll', () => appInstance.authPoll())
 ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult(ms))
 ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
 ipcMain.handle('auth:status', () => appInstance.authStatus())
+ipcMain.handle('fs:openDir', (_e, p: string) => { if (p) try { shell.showItemInFolder(p) } catch { /* 路径不存在等错误忽略 */ } })
 
 function createWindow(): void {
   const win = new BrowserWindow({

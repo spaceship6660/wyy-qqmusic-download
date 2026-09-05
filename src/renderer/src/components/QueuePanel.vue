@@ -15,7 +15,7 @@ async function openDir(outputPath?: string): Promise<void> {
   try {
     await window.api.invoke('fs:openDir', outputPath)
   } catch {
-    // 主进程暂未注册 fs:openDir（T12 接入），忽略错误，用户可自行打开下载目录
+    // 主进程 fs:openDir 找不到路径时忽略，用户可自行打开下载目录
   }
 }
 
