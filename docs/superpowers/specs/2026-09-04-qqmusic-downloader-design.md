@@ -29,7 +29,7 @@
 | 批量入口 | 搜索 / 单曲 / 歌单 / 专辑 |
 | 加密格式 | 新版 `.mflac/.mflac0/.mgg/.mgg0/.mgg1` 系（不移植老 qmc0/qmc3） |
 | 解密产物 | **保持原容器**：mflac→flac、mgg→ogg；检测到系统 ffmpeg 时提供可选「转 flac」 |
-| MP3 标签 | **ID3v2.4 + UTF-8** |
+| MP3 标签 | **ID3v2.3 + UTF-16**（node-id3 0.2.9 硬编码，已批准偏差；foobar2000/Musicolet 兼容不受影响） |
 
 许可：移植 unlock-music（MIT）qmc 解密核心、参考 lx-music（MIT）node-id3 管线写法，均需在代码注释标注出处。
 
@@ -101,7 +101,7 @@ renderer (Vue3 + Pinia)  ── preload contextBridge（白名单 invoke）─�
 
 | 容器 | 写入内容 | 说明 |
 |---|---|---|
-| MP3 | ID3v2.4 + UTF-8；**USLT**（lang=`XXX`，descr 空，非同步歌词全文）+ **SYLT**（format=1=LRC 时间戳格式，type=0，descr 空）+ **APIC**（type=3）+ `TIT2/TPE1/TALB/TDRC/TCOP/TCON` | foobar 原生解析 USLT 为歌词字段（显示需任意歌词组件：ESLyric / Lyric Show Panel 3 / OpenLyrics）；Musicolet 原生读 ID3 内嵌歌词 |
+| MP3 | ID3v2.3 + UTF-16（node-id3 0.2.9 硬编码，已批准偏差；foobar2000/Musicolet 兼容不受影响）；**USLT**（lang=`XXX`，descr 空，非同步歌词全文）+ **SYLT**（format=2（毫秒，对应 LRC 时间戳），type=0，descr 空）+ **APIC**（type=3）+ `TIT2/TPE1/TALB/TDRC/TCOP/TCON` | foobar 原生解析 USLT 为歌词字段（显示需任意歌词组件：ESLyric / Lyric Show Panel 3 / OpenLyrics）；Musicolet 原生读 ID3 内嵌歌词 |
 | FLAC / OGG | Vorbis comment：**`LYRICS` + `UNSYNCEDLYRICS` 双键**（同一份纯文本，勿再加小写 `lyrics`，Vorbis 大小写不敏感会重复）+ `METADATA_BLOCK_PICTURE`（type=3）+ `TITLE/ARTIST/ALBUM/DATE/COPYRIGHT/GENRE` | `LYRICS`=foobar 原生键；`UNSYNCEDLYRICS`=Mp3tag 系惯例；双键覆盖 Musicolet 未公开的 FLAC 键名未知数 |
 | .lrc 另存 | 与音频**同目录同名**，UTF-8 | Musicolet 同步歌词最稳路径（官方要求文件名完全一致）；foobar 组件也读本地 .lrc |
 

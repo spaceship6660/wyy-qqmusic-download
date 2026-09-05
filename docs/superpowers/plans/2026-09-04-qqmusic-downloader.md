@@ -1537,7 +1537,7 @@ describe('tagMp3', () => {
     const tags = NodeID3.read(dest)
     expect(tags.title).toBe('测试歌曲')
     expect(tags.artist).toBe('歌手A / 歌手B')
-    expect(tags.recordTime).toBe('2020-05-01')
+    expect(tags.recordingTime).toBe('2020-05-01')
     const uslt = tags.unsynchronisedLyrics
     expect(Array.isArray(uslt) ? uslt.some((u: any) => u.text.includes('第一行')) : String(uslt).includes('第一行')).toBe(true)
     expect(tags.image?.imageBuffer).toBeTruthy()
@@ -1606,12 +1606,14 @@ export function parseLrcToSylt(lrc: string): SyncLine[] {
   const out: SyncLine[] = []
   const re = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g
   for (const line of lrc.split('\n')) {
-    const m = line.match(re)
-    if (!m) continue
+    const timestamps = [...line.matchAll(re)]
+    if (timestamps.length === 0) continue
     const text = line.replace(re, '').trim()
-    const mm = Number(m[1]), ss = Number(m[2])
-    const frac = m[3] ? Number(m[3].padEnd(3, '0')) : 0
-    out.push({ timeStamp: (mm * 60 + ss) * 1000 + frac, text })
+    for (const m of timestamps) {
+      const mm = Number(m[1]), ss = Number(m[2])
+      const frac = m[3] ? Number(m[3].padEnd(3, '0')) : 0
+      out.push({ timeStamp: (mm * 60 + ss) * 1000 + frac, text })
+    }
   }
   return out
 }
@@ -1622,9 +1624,8 @@ export async function tagMp3(path: string, meta: TagMeta): Promise<void> {
     artist: meta.artist,
     album: meta.album,
     genre: meta.genre,
-    raw: {},
   }
-  if (meta.date) frames.raw['TDRC'] = meta.date            // ID3v2.4 录制时间
+  if (meta.date) frames.recordingTime = meta.date        // ID3v2.4 TDRC 录制时间（node-id3 原生映射）
   if (meta.copyright) frames.copyright = meta.copyright
   if (meta.cover && meta.coverMime) {
     frames.image = {
@@ -1643,7 +1644,7 @@ export async function tagMp3(path: string, meta: TagMeta): Promise<void> {
         language: 'XXX',
         timeStampFormat: 2,
         contentType: 0,
-        text: sylt.map((s) => ({ timeStamp: s.timeStamp, text: s.text })),
+        synchronisedText: sylt.map((s) => ({ timeStamp: s.timeStamp, text: s.text })),
       }
     }
   }

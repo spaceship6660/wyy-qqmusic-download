@@ -11,6 +11,7 @@ export function parseLrcToSylt(lrc: string): SyncLine[] {
     const timestamps = [...line.matchAll(re)]
     if (timestamps.length === 0) continue
     const text = line.replace(re, '').trim()
+    if (text === '') continue
     for (const m of timestamps) {
       const mm = Number(m[1]), ss = Number(m[2])
       const frac = m[3] ? Number(m[3].padEnd(3, '0')) : 0
@@ -50,5 +51,6 @@ export async function tagMp3(path: string, meta: TagMeta): Promise<void> {
     }
   }
   const ok = NodeID3.write(frames, path)
-  if (!ok) throw new Error('MP3 标签写入失败')
+  // node-id3 0.2.9 write 失败时返回 Error 对象（不是 false），须按 !== true 判定
+  if (ok !== true) throw ok instanceof Error ? ok : new Error('MP3 标签写入失败')
 }
