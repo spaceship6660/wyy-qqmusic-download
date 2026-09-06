@@ -2,16 +2,16 @@
 import { ref, onMounted } from 'vue'
 import SearchBar from './components/SearchBar.vue'
 import TrackGrid from './components/TrackGrid.vue'
-import QueuePanel from './components/QueuePanel.vue'
 import LoginButton from './components/LoginButton.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import NeteaseTab from './components/NeteaseTab.vue'
 import DecryptTab from './components/DecryptTab.vue'
+import DownloadPage from './components/DownloadPage.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
 import { useDownloadStore } from './stores/download'
 
-// 左侧导航：QQ 音乐下载 / 网易云下载 同级两块；解密、设置并列
-const tab = ref<'qq' | 'netease' | 'decrypt' | 'settings'>('qq')
+// 左侧导航：QQ 音乐下载 / 网易云下载 同级两块；我的下载、解密、设置并列
+const tab = ref<'qq' | 'netease' | 'download' | 'decrypt' | 'settings'>('qq')
 const store = useDownloadStore()
 const q = ref('')
 
@@ -65,6 +65,7 @@ onMounted(() => {
       <nav>
         <button :class="{ active: tab === 'qq' }" @click="tab = 'qq'">QQ 音乐下载</button>
         <button :class="{ active: tab === 'netease' }" @click="tab = 'netease'">网易云下载</button>
+        <button :class="{ active: tab === 'download' }" @click="tab = 'download'">我的下载</button>
         <button :class="{ active: tab === 'decrypt' }" @click="tab = 'decrypt'">解密</button>
         <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">设置</button>
       </nav>
@@ -80,13 +81,6 @@ onMounted(() => {
       <section v-if="tab === 'qq'">
         <SearchBar v-model="q" @search="doSearch" />
         <DownloadOptions />
-        <div class="action-row">
-          <button @click="store.selectAll()">全选</button>
-          <button @click="store.clear()">清空</button>
-          <button class="primary" :disabled="store.selectedIds.size === 0" @click="enqueue">
-            下载选中 ({{ store.selectedIds.size }}) - {{ store.quality }}
-          </button>
-        </div>
         <TrackGrid
           :tracks="store.tracks"
           :selected-ids="store.selectedIds"
@@ -94,9 +88,17 @@ onMounted(() => {
           @select-all="store.selectAll()"
           @clear="store.clear()"
         />
-        <QueuePanel :queue="store.queue" />
+        <!-- 下载操作在页面下部（列表之后） -->
+        <div class="action-row">
+          <button @click="store.selectAll()">全选</button>
+          <button @click="store.clear()">清空</button>
+          <button class="primary" :disabled="store.selectedIds.size === 0" @click="enqueue">
+            下载选中 ({{ store.selectedIds.size }}) - {{ store.quality }}
+          </button>
+        </div>
       </section>
       <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
+      <section v-else-if="tab === 'download'"><DownloadPage /></section>
       <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>

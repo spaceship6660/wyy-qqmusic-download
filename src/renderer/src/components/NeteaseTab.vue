@@ -64,6 +64,13 @@ function selectAll(): void {
 function enqueue(): void {
   const selected = currentTracks.value.filter((t) => selectedIds.value.has(t.id))
   if (selected.length) {
+    // 2026-09-06 实测：匿名直链已被服务端收紧（url:null，播放不受影响）——未登录时
+    // 下载必然失败，直接弹登录窗（扫码一次即带 MUSIC_U 重新可用），不再干提示
+    if (!loggedIn.value) {
+      void openLogin()
+      error.value = '网易云下载需登录（匿名直链已被服务端收紧，2026-09-06）：已弹出登录窗口，扫码后重新点下载即可'
+      return
+    }
     void window.api.invoke('dl:enqueue', {
       tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'netease',
     })
@@ -122,13 +129,14 @@ onMounted(() => {
       </ul>
     </aside>
     <div class="grid">
+      <TrackGrid :tracks="currentTracks" :selected-ids="selectedIds" @toggle="toggleSel" />
+      <!-- 下载操作在页面下部（列表之后） -->
       <div class="action-row">
         <button class="primary" :disabled="selectedIds.size === 0" @click="enqueue">
           下载选中 ({{ selectedIds.size }})
         </button>
         <button class="ghost" :disabled="currentTracks.length === 0" @click="selectAll">全选</button>
       </div>
-      <TrackGrid :tracks="currentTracks" :selected-ids="selectedIds" @toggle="toggleSel" />
     </div>
   </div>
 </template>

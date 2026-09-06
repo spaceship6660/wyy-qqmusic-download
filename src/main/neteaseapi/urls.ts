@@ -26,5 +26,13 @@ export async function neGetAudioUrl(
     const url = json?.data?.[0]?.url
     if (url) return { url, quality: q, downgraded: !supported || i > startIdx }
   }
-  throw new QqApiError('未拿到可播放 URL（可能无版权/未上架，VIP 歌需登录，无损需会员权益）', 'no-playable-url')
+  throw new QqApiError(
+    // 2026-09-06 实测：匿名下所有歌曲直链均 url:null（code 404）——网易云已收紧匿名下载
+    // （2026-09-04 验收时 320k 尚可用，同日收紧与 QQ 匿名收紧同期）；已登录仍失败才是
+    // 版权/VIP 问题。文案按登录态分流，引导用户先扫码再下载。
+    client.getCookie()
+      ? '未拿到可播放 URL（可能无版权/未上架，VIP 歌需会员权益）'
+      : '网易云下载需登录：匿名直链已被服务端收紧（2026-09-06），请先扫码登录；VIP 歌还需会员权益',
+    'no-playable-url',
+  )
 }

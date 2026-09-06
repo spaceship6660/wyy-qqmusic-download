@@ -45,5 +45,9 @@ export const useDownloadStore = defineStore('download', {
       if (idx >= 0) this.queue[idx] = entry
       else this.queue.push(entry)
     },
+    /** 清除已完成/失败的历史记录（进行中与排队中的保留） */
+    clearDone() {
+      this.queue = this.queue.filter((q) => q.state === 'queued' || q.state === 'running')
+    },
   },
 })

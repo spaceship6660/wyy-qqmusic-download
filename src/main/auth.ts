@@ -130,6 +130,11 @@ export function createAuth(options: AuthOptions): Auth {
       const eq = pair.indexOf('=')
       if (eq <= 0) continue
       const name = pair.slice(0, eq)
+      // 空值 Set-Cookie 是服务端的「清空」标识（同一响应里先种值再清空的场景，
+      // 2026-09-06 诊断日志实锤：check_sig 302 先给 p_skey=mJGS… 后又发 p_skey=）。
+      // 字符串合并若让清空项覆盖有效值 → 「获取 p_skey 失败」（参考 cookiejar 按
+      // domain/path 分条存取不受影响）。跳过空值，保留已合并的有效值。
+      if (!pair.slice(eq + 1)) continue
       const kept = cookieJar
         .split(';')
         .map((p) => p.trim())

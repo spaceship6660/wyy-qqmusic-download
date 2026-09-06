@@ -57,16 +57,17 @@ function routerFetch(seq: MockSeq): typeof fetch {
     }
     if (pathname === '/check_sig') {
       // 首跳 302 的 Set-Cookie 里直接带 p_skey（QQ 真实行为，L-1124/Spica 实证）；
-      // 实现不得带 Cookie 头请求本端点，也不跟随重定向
-      return new Response('', {
-        status: 302,
-        headers: {
-          location:
-            seq.checkSigLocation ??
-            'https://ssl.ptlogin2.qq.com/login_jump?jumpurl=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump',
-          ...(seq.noPkey ? {} : { 'set-cookie': 'p_skey=PSKEY123; Path=/; HttpOnly' }),
-        },
-      })
+      // 关键形态（2026-09-06 诊断日志实锤）：同一次响应里先种 p_skey 值、再尾随
+      // 空值 p_skey=（服务端清空项）——字符串合并若让清空项覆盖有效值 → 登录失败。
+      // 实现必须保留先前的有效值（参考 cookiejar 按 domain/path 分条不受影响）。
+      const h = new Headers()
+      h.append('location', seq.checkSigLocation ?? 'https://ssl.ptlogin2.qq.com/login_jump?jumpurl=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump')
+      if (!seq.noPkey) {
+        h.append('set-cookie', 'p_uin=o2727653933; Path=/')
+        h.append('set-cookie', 'p_skey=PSKEY123; Path=/; HttpOnly')
+        h.append('set-cookie', 'p_skey=; Path=/; HttpOnly') // 清空项：必须被跳过
+      }
+      return new Response('', { status: 302, headers: h })
     }
     if (pathname === '/login_jump' || pathname === '/oauth2.0/login_jump') {
       // 不再跟随（redirect:'manual' 首跳即止）——保留路由仅为兜底防挂链
