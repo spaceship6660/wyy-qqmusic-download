@@ -9,6 +9,7 @@ interface UiSettings {
   concurrency: number
   downloadDir: string
   lyricMode: 'both' | 'embed' | 'lrc' | 'none'
+  decryptOutDir: string
 }
 
 const settings = ref<UiSettings>({
@@ -16,16 +17,18 @@ const settings = ref<UiSettings>({
   concurrency: 2,
   downloadDir: 'downloads',
   lyricMode: 'both',
+  decryptOutDir: 'decrypted',
 })
 const loaded = ref(false)
 const dirNotice = ref('')
 let dirTimer: ReturnType<typeof setTimeout> | null = null
+let decryptDirTimer: ReturnType<typeof setTimeout> | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(async () => {
   try {
     const s = await window.api.invoke('settings:get')
-    if (s) settings.value = { quality: s.quality ?? '320', concurrency: s.concurrency ?? 2, downloadDir: s.downloadDir ?? '', lyricMode: s.lyricMode ?? 'both' }
+    if (s) settings.value = { quality: s.quality ?? '320', concurrency: s.concurrency ?? 2, downloadDir: s.downloadDir ?? '', lyricMode: s.lyricMode ?? 'both', decryptOutDir: s.decryptOutDir ?? '' }
   } catch {
     // 读取失败则保留默认值
   }
@@ -33,6 +36,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   if (dirTimer) clearTimeout(dirTimer)
+  if (decryptDirTimer) clearTimeout(decryptDirTimer)
   if (saveTimer) clearTimeout(saveTimer)
 })
 
@@ -58,6 +62,13 @@ function setDir(v: string): void {
   dirTimer = setTimeout(() => { dirTimer = null; void window.api.invoke('settings:set', { downloadDir: v }) }, 400)
 }
 
+/** 解密输出目录：与下载目录同款独立防抖（互不清理对方的定时器） */
+function setDecryptDir(v: string): void {
+  settings.value.decryptOutDir = v
+  if (decryptDirTimer) { clearTimeout(decryptDirTimer); decryptDirTimer = null }
+  decryptDirTimer = setTimeout(() => { decryptDirTimer = null; void window.api.invoke('settings:set', { decryptOutDir: v }) }, 400)
+}
+
 function setLyricMode(m: UiSettings['lyricMode']): void {
   settings.value.lyricMode = m
   store.setLyricMode(m) // 与码率一致：store 为当前下载选择的单一事实源，改了默认值即同步当前选择
@@ -78,6 +89,19 @@ function pickDir(e: Event): void {
     dirNotice.value = '已选择下载目录'
   } else {
     dirNotice.value = '未能读取所选文件夹路径，请在输入框中手动粘贴完整路径'
+  }
+}
+
+function pickDecryptDir(e: Event): void {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  const candidate = window.api.getPathForFile(f)
+  if (candidate) {
+    if (decryptDirTimer) { clearTimeout(decryptDirTimer); decryptDirTimer = null }
+    settings.value.decryptOutDir = candidate
+    void window.api.invoke('settings:set', { decryptOutDir: candidate })
   }
 }
 </script>
@@ -114,6 +138,16 @@ function pickDir(e: Event): void {
           </label>
         </div>
         <div v-if="dirNotice" class="notice">{{ dirNotice }}</div>
+      </div>
+      <div class="field">
+        <span class="label">解密输出目录</span>
+        <div class="dir-row">
+          <input class="text-input" type="text" :value="settings.decryptOutDir" @input="setDecryptDir(($event.target as HTMLInputElement).value)" />
+          <label class="pick-btn">
+            选择目录
+            <input type="file" webkitdirectory class="hidden-input" @change="pickDecryptDir" />
+          </label>
+        </div>
       </div>
       <div class="field">
         <span class="label">默认歌词模式（下载时可改）</span>

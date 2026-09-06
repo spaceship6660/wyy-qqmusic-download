@@ -6,6 +6,7 @@ import QueuePanel from './components/QueuePanel.vue'
 import LoginButton from './components/LoginButton.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import NeteaseTab from './components/NeteaseTab.vue'
+import DecryptTab from './components/DecryptTab.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
 import { useDownloadStore } from './stores/download'
 
@@ -96,7 +97,7 @@ onMounted(() => {
         <QueuePanel :queue="store.queue" />
       </section>
       <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
-      <section v-else-if="tab === 'decrypt'">解密（后续计划）</section>
+      <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>
   </div>

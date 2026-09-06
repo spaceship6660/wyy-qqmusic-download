@@ -1,11 +1,19 @@
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
+import { appendFileSync } from 'node:fs'
 import { createApp } from './app'
 import { buildCookieHeader, cookieHeaderHasMusicU } from './neteaseAuth'
 
-// QQ_DIAG_LOG=<路径> 时把 QQ 登录各网络步响应摘要追加到该文件（仅登录排障用，
-// 正常使用不设置；路径建议放临时目录，用完即删，内容含部分会话凭据摘要）
-const diagLogFile = process.env['QQ_DIAG_LOG'] || undefined
+// QQ 登录诊断日志：默认写入 userData/qq-login-diag.log（每次扫码尝试追加，
+// 失败时 UI 显示该路径；内容含 QQ 号与会话 token 摘要，仅本机排障用，不入库）。
+// QQ_DIAG_LOG 可覆盖路径（测试/临时目录）。
+const diagLogFile = process.env['QQ_DIAG_LOG'] || join(app.getPath('userData'), 'qq-login-diag.log')
+try {
+  // 启动头：区分构建版本（若用户跑的是旧包，日志里不会有这一行）
+  appendFileSync(diagLogFile, `[${new Date().toISOString()}] 音乐下载器 v${app.getVersion()} 启动\n`, 'utf-8')
+} catch {
+  // 诊断文件写失败（只读目录等）不影响使用
+}
 
 const appInstance = createApp({
   userDataDir: app.getPath('userData'),
@@ -33,6 +41,7 @@ ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult
 ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
 ipcMain.handle('auth:status', () => appInstance.authStatus())
 ipcMain.handle('fs:openDir', (_e, p: string) => { if (p) try { shell.showItemInFolder(p) } catch { /* 路径不存在等错误忽略 */ } })
+ipcMain.handle('unlock:run', async (_e, paths: unknown) => appInstance.unlockRun(Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : []))
 ipcMain.handle('ne:search', (_e, q: string) => appInstance.neSearch(q))
 ipcMain.handle('ne:account', () => appInstance.neAccount())
 ipcMain.handle('ne:playlists', (_e, uid: number) => appInstance.nePlaylists(uid))

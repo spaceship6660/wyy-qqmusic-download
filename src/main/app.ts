@@ -13,6 +13,8 @@ import { DownloadQueue, DownloadJob } from './downloader/queue'
 import { RateLimiter } from './downloader/ratelimit'
 import { downloadFile } from './downloader/file'
 import { tagFile } from './tagger'
+import type { TagMeta } from './tagger/types'
+import { decryptQmcFile } from './unlock/decrypt'
 import { safeName, uniquePath } from './fsUtils'
 import { loadSettings, saveSettings, Settings } from './settings'
 
@@ -28,6 +30,14 @@ export interface AppDeps {
 export function sniffImageMime(buf: Buffer): 'image/png' | 'image/jpeg' {
   if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
   return 'image/jpeg'
+}
+
+/** 解密单个文件的结果：completed=解密+补全标签 / decrypted=仅解密（搜索未命中/容器不可补） / failed=失败 */
+export interface UnlockJobResult {
+  file: string
+  status: 'completed' | 'decrypted' | 'failed'
+  outputPath?: string
+  reason?: string
 }
 
 export function createApp(deps: AppDeps) {
@@ -153,6 +163,73 @@ export function createApp(deps: AppDeps) {
     })
   }
 
+  // 解密补全管线（unlock:run）：读 .mflac/.mgg 加密文件 → 解密 → 文件名「歌手 - 歌名」
+  // 搜索 QQ 匹配 → flac/mp3 补封面/歌词/标签；ogg 等容器只解密不补全。
+  // 结果三元：completed=解密+补全 / decrypted=仅解密（搜索未命中或容器不可补） / failed=失败
+  const QMC_EXTS = new Set(['.mflac', '.mflac0', '.mgg', '.mgg0', '.mgg1', '.qmc0', '.qmcflac', '.qmcogg'])
+  const completeExts = new Set(['flac', 'mp3']) // 仅这两个容器有标签写入器（tagger）
+
+  const unlockRun = async (files: string[]): Promise<UnlockJobResult[]> => {
+    const outDir = path.resolve(settings.decryptOutDir || 'decrypted')
+    fs.mkdirSync(outDir, { recursive: true })
+    const results: UnlockJobResult[] = []
+    for (const file of files) {
+      // 逐个处理：解密是 CPU 活、补全是网络活，串行控制请求节奏（防风控）
+      results.push(await unlockOneFile(file, outDir))
+    }
+    return results
+  }
+
+  async function unlockOneFile(file: string, outDir: string): Promise<UnlockJobResult> {
+    const base = path.basename(file)
+    const ext = path.extname(file).toLowerCase()
+    if (!QMC_EXTS.has(ext)) return { file, status: 'failed', reason: `不支持的扩展名 ${ext}` }
+    let decrypted: ReturnType<typeof decryptQmcFile>
+    try {
+      decrypted = decryptQmcFile(fs.readFileSync(file))
+    } catch (e) {
+      return { file, status: 'failed', reason: e instanceof Error ? e.message : String(e) }
+    }
+    // 尝试补全：文件名按「歌手 - 歌名」/「歌名 - 歌手」拆段搜索，取首条
+    const parts = base.slice(0, -ext.length).split(/\s+-\s+/).map((s) => s.trim()).filter(Boolean)
+    let track: TrackDTO | null = null
+    if (completeExts.has(decrypted.ext) && parts.length >= 2) {
+      try {
+        const query = `${parts[0]} ${parts.slice(1).join(' ')}`
+        const hits = await searchTracks(client, query)
+        track = hits[0] ?? null
+      } catch {
+        track = null // 搜索失败不阻塞解密
+      }
+    }
+    const outName = track ? `${safeName(track.name)} - ${safeName(track.artist)}.${decrypted.ext}` : `${safeName(base.slice(0, -ext.length))}.${decrypted.ext}`
+    const outPath = uniquePath(path.join(outDir, outName))
+    fs.writeFileSync(outPath, decrypted.audio)
+
+    if (!track) return { file, status: 'decrypted', outputPath: outPath, reason: '搜索未命中，仅解密' }
+    try {
+      const cover = await fetchCover(track.cover, fetchImpl)
+      const lyrics = await fetchLyric(client, track.id) // 失败返回空串，不阻塞
+      const meta: TagMeta = {
+        title: track.name,
+        artist: track.artist,
+        album: track.album || '未知专辑',
+        date: '',
+        copyright: '',
+        genre: '',
+        lyrics,
+        cover: cover?.data,
+        coverMime: cover?.mime,
+      }
+      const lyricMode = settings.lyricMode
+      await tagFile(outPath, meta, { saveLrc: lyricMode === 'both' || lyricMode === 'lrc' })
+      return { file, status: 'completed', outputPath: outPath }
+    } catch (e) {
+      // 文件已解密落盘，补全失败不删文件
+      return { file, status: 'decrypted', outputPath: outPath, reason: `补全失败：${e instanceof Error ? e.message : String(e)}` }
+    }
+  }
+
   return {
     search: (q: string) => searchTracks(client, q),
     parseLink: async (url: string) => {
@@ -196,7 +273,12 @@ export function createApp(deps: AppDeps) {
     },
     authStartQr: () => auth.startQr(),
     authPoll: () => auth.poll(),
-    authWaitResult: (ms: number) => auth.waitForResult(ms),
+    authWaitResult: async (ms: number) => {
+      const res = await auth.waitForResult(ms)
+      // 失败时把诊断日志路径带进 UI（仅排障用；诊断文件在 userData，不入库、不打印内容）
+      if (!res.ok && deps.debugLogFile) return { ok: false, reason: `${res.reason}\n（诊断日志：${deps.debugLogFile}）` }
+      return res
+    },
     authImportCookie: (cookie: string) => auth.importCookie(cookie),
     authStatus: () => {
       const s = auth.getStatus()
@@ -220,6 +302,7 @@ export function createApp(deps: AppDeps) {
       neAuth.saveCookie(header)
       neClient.setCookie(header)
     },
+    unlockRun,
   }
 }
 
