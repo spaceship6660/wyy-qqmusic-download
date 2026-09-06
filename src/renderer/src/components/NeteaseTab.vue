@@ -137,6 +137,12 @@ function onBottomDownload(): void {
         </li>
       </ul>
     </aside>
+    <aside v-else class="playlists login-hint">
+      <h3>我的歌单</h3>
+      <p>登录网易云后，这里会显示<b>我喜欢的音乐</b>（❤）与你的<strong>全部歌单</strong>（收藏 + 自建），点开即可批量下载。</p>
+      <button class="ghost" @click="openLogin">扫码登录</button>
+      <button class="ghost" @click="showImport = !showImport">手动导入 Cookie</button>
+    </aside>
     <div class="grid">
       <TrackGrid :tracks="currentTracks" :selected-ids="store.neSelectedIds" @toggle="toggleSel" />
     </div>
@@ -173,5 +179,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 6px;
 }
 .playlists li:hover { background: #eefaf4; color: #31c27c; }
+.login-hint { border: 1px dashed #31c27c; border-radius: 8px; padding: 10px 14px; color: #666; }
+.login-hint p { font-size: 13px; margin: 0 0 10px; }
+.login-hint h3 { margin-top: 0; }
+.login-hint .ghost { margin-right: 8px; }
 .action-row { display: flex; gap: 8px; }
 </style>
