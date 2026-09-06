@@ -1,6 +1,6 @@
 {
   "name": "qq-music-downloader",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "QQ 音乐下载器（Electron）",
   "main": "out/main/index.js",
