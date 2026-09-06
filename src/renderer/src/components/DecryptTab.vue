@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { api } from '../api'
 
 interface UnlockResult {
   file: string
@@ -37,7 +38,7 @@ function addFiles(paths: string[]): void {
 function pickFiles(e: Event): void {
   const input = e.target as HTMLInputElement
   const picked = Array.from(input.files ?? [])
-    .map((f) => window.api.getPathForFile(f))
+    .map((f) => api.getPathForFile(f))
     .filter(Boolean) as string[]
   input.value = ''
   addFiles(picked)
@@ -47,7 +48,7 @@ function pickFiles(e: Event): void {
 function pickDir(e: Event): void {
   const input = e.target as HTMLInputElement
   const picked = Array.from(input.files ?? [])
-    .map((f) => window.api.getPathForFile(f))
+    .map((f) => api.getPathForFile(f))
     .filter(Boolean) as string[]
   input.value = ''
   addFiles(picked)
@@ -63,7 +64,7 @@ async function run(): Promise<void> {
   error.value = ''
   results.value = []
   try {
-    results.value = await window.api.invoke('unlock:run', files.value)
+    results.value = await api.invoke('unlock:run', files.value)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -72,15 +73,15 @@ async function run(): Promise<void> {
 }
 
 function openOutDir(): void {
-  if (outDir.value) void window.api.invoke('fs:openDir', outDir.value)
+  if (outDir.value) void api.invoke('fs:openDir', outDir.value)
 }
 
 function openFile(p: string): void {
-  if (p) void window.api.invoke('fs:openDir', p)
+  if (p) void api.invoke('fs:openDir', p)
 }
 
 onMounted(() => {
-  void window.api.invoke('settings:get').then((s: any) => {
+  void api.invoke('settings:get').then((s: any) => {
     outDir.value = s?.decryptOutDir ?? ''
   })
 })

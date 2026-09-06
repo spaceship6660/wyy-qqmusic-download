@@ -9,6 +9,7 @@ import DecryptTab from './components/DecryptTab.vue'
 import DownloadPage from './components/DownloadPage.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
 import { useDownloadStore } from './stores/download'
+import { api } from './api'
 
 // 左侧导航：QQ 音乐下载 / 网易云下载 同级两块；我的下载、解密、设置并列
 const tab = ref<'qq' | 'netease' | 'download' | 'decrypt' | 'settings'>('qq')
@@ -28,12 +29,12 @@ async function doSearch(): Promise<void> {
   try {
     // 歌单/专辑/单曲链接 → 解析抓取；否则走搜索
     if (/y\.qq\.com\/n\/ryqq\/(songDetail|playlist|albumDetail)/.test(text)) {
-      const res: any = await window.api.invoke('qq:linkTracks', text)
+      const res: any = await api.invoke('qq:linkTracks', text)
       if (res?.tracks?.length) store.setTracks(res.tracks)
       else window.alert('未能解析该链接，请确认是 QQ 音乐歌单 / 专辑 / 单曲链接')
       return
     }
-    const tracks: any = await window.api.invoke('qq:search', text)
+    const tracks: any = await api.invoke('qq:search', text)
     if (!Array.isArray(tracks)) window.alert('搜索失败，请稍后重试')
     else store.setTracks(tracks)
   } catch (e) {
@@ -49,7 +50,7 @@ async function downloadSelected(): Promise<void> {
     if (tab.value === 'qq') {
       const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
       if (selected.length) {
-        await window.api.invoke('dl:enqueue', {
+        await api.invoke('dl:enqueue', {
           tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'qq',
         })
         store.clear()
@@ -74,16 +75,16 @@ onMounted(() => {
 })
 
 onMounted(() => {
-  void window.api.invoke('auth:status').then((s: any) => store.setLogin(!!s?.loggedIn, s?.uin ?? ''))
+  void api.invoke('auth:status').then((s: any) => store.setLogin(!!s?.loggedIn, s?.uin ?? ''))
   // 设置的码率/歌词模式只是默认值：启动时载入 store 作为当前下载选择
-  void window.api.invoke('settings:get').then((s: any) => {
+  void api.invoke('settings:get').then((s: any) => {
     if (s?.quality) store.setQuality(s.quality)
     if (s?.lyricMode) store.setLyricMode(s.lyricMode)
   })
-  window.api.on('dl:jobStart', store.onQueueEvent)
-  window.api.on('dl:progress', store.onQueueEvent)
-  window.api.on('dl:done', store.onQueueEvent)
-  window.api.on('dl:failed', store.onQueueEvent)
+  api.on('dl:jobStart', store.onQueueEvent)
+  api.on('dl:progress', store.onQueueEvent)
+  api.on('dl:done', store.onQueueEvent)
+  api.on('dl:failed', store.onQueueEvent)
 })
 </script>
 

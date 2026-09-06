@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { UiQueueJob } from '../stores/download'
 import { useDownloadStore } from '../stores/download'
+import { api } from '../api'
 
 const store = useDownloadStore()
 
@@ -20,7 +21,7 @@ const SOURCE_TEXT: Record<string, string> = { qq: 'QQ', netease: '网易云' }
 async function openDir(outputPath?: string): Promise<void> {
   if (!outputPath) return
   try {
-    await window.api.invoke('fs:openDir', outputPath)
+    await api.invoke('fs:openDir', outputPath)
   } catch {
     // 主进程 fs:openDir 找不到路径时忽略，用户可自行打开下载目录
   }

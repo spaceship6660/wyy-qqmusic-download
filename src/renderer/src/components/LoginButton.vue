@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
+import { api } from '../api'
 
 defineProps<{ loggedIn: boolean; uin: string }>()
 const emit = defineEmits<{ changed: [{ loggedIn: boolean; uin: string }] }>()
@@ -43,7 +44,7 @@ function scheduleAutoClose(): void {
 }
 
 async function refreshStatus(): Promise<void> {
-  const s = await window.api.invoke('auth:status')
+  const s = await api.invoke('auth:status')
   emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '' })
 }
 
@@ -52,7 +53,7 @@ async function onPoll(): Promise<void> {
   if (my !== session) return
   let status: string
   try {
-    status = await window.api.invoke('auth:poll')
+    status = await api.invoke('auth:poll')
   } catch (e) {
     if (my !== session) return
     stopPolling()
@@ -72,7 +73,7 @@ async function onPoll(): Promise<void> {
       stopPolling()
       qrPhase.value = 'finalizing' // UI：正在完成登录…
       try {
-        const res = await window.api.invoke('auth:waitResult', 600000)
+        const res = await api.invoke('auth:waitResult', 600000)
         if (my !== session) return
         if (res?.ok) {
           await refreshStatus()
@@ -118,7 +119,7 @@ async function startLogin(): Promise<void> {
   qrOpen.value = true
   qrPhase.value = 'loading'
   try {
-    const res = await window.api.invoke('auth:startQr')
+    const res = await api.invoke('auth:startQr')
     if (my !== session) return // 等待二维码期间模态被关闭 → 丢弃，不进入轮询
     qrDataUrl.value = res?.qrDataUrl ?? ''
     qrPhase.value = 'waiting'
@@ -146,7 +147,7 @@ async function importCookie(): Promise<void> {
   const my = session
   cookieError.value = ''
   try {
-    const ok = await window.api.invoke('auth:importCookie', text)
+    const ok = await api.invoke('auth:importCookie', text)
     if (my !== session) return
     if (ok) {
       stopPolling()

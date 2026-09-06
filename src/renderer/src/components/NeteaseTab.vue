@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
+import { api } from '../api'
 
 interface NePlaylist { id: number; name: string; liked: boolean; trackCount: number }
 interface NeTrack { id: string; name: string; artist: string; album: string; cover: string; vip?: boolean }
@@ -18,10 +19,10 @@ const cookieText = ref('')
 const showImport = ref(false)
 
 async function refreshAuth(): Promise<void> {
-  const s: any = await window.api.invoke('ne:auth:status')
+  const s: any = await api.invoke('ne:auth:status')
   loggedIn.value = s.loggedIn
   if (s.loggedIn) {
-    const acc: any = await window.api.invoke('ne:account')
+    const acc: any = await api.invoke('ne:account')
     if (acc) {
       nickname.value = acc.nickname
       void loadPlaylists(acc.uid)
@@ -30,13 +31,13 @@ async function refreshAuth(): Promise<void> {
 }
 
 async function loadPlaylists(uid: number): Promise<void> {
-  const pls: any = await window.api.invoke('ne:playlists', uid)
+  const pls: any = await api.invoke('ne:playlists', uid)
   playlists.value = pls ?? []
 }
 
 async function openPlaylist(id: number): Promise<void> {
   error.value = ''
-  const r: any = await window.api.invoke('ne:playlist', String(id))
+  const r: any = await api.invoke('ne:playlist', String(id))
   currentTracks.value = r.tracks ?? []
   store.neClear()
   if (r.requiresLogin && !loggedIn.value) error.value = '未登录，登录后查看完整曲目'
@@ -44,7 +45,7 @@ async function openPlaylist(id: number): Promise<void> {
 
 async function doSearch(): Promise<void> {
   error.value = ''
-  const tracks: any = await window.api.invoke('ne:search', q.value.trim())
+  const tracks: any = await api.invoke('ne:search', q.value.trim())
   currentTracks.value = tracks ?? []
   store.neClear()
 }
@@ -63,7 +64,7 @@ async function enqueue(): Promise<boolean> {
   // 匿名即可下载普通歌（2026-09-06 真实网络冒烟：320k 直链 + 完整下载通过）；
   // 个别版权歌匿名拿不到直链，登录后可下——不拦截，失败时队列显示原因与引导
   try {
-    await window.api.invoke('dl:enqueue', {
+    await api.invoke('dl:enqueue', {
       tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'netease',
     })
   } catch (e) {
@@ -76,12 +77,12 @@ async function enqueue(): Promise<boolean> {
 }
 
 async function openLogin(): Promise<void> {
-  await window.api.invoke('ne:auth:open')
+  await api.invoke('ne:auth:open')
 }
 
 async function doImportCookie(): Promise<void> {
   // 手动导入用内联 textarea，不用 window.prompt（Electron 不实现它）
-  const ok: boolean = await window.api.invoke('ne:auth:importCookie', cookieText.value)
+  const ok: boolean = await api.invoke('ne:auth:importCookie', cookieText.value)
   if (ok) {
     cookieText.value = ''
     showImport.value = false
@@ -93,7 +94,7 @@ async function doImportCookie(): Promise<void> {
 
 onMounted(() => {
   void refreshAuth()
-  window.api.on('ne:authChanged', () => void refreshAuth())
+  api.on('ne:authChanged', () => void refreshAuth())
   window.addEventListener('ne:download-selected', onBottomDownload)
 })
 

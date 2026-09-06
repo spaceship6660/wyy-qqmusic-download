@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useDownloadStore } from '../stores/download'
+import { api } from '../api'
 
 const store = useDownloadStore()
 
@@ -27,7 +28,7 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(async () => {
   try {
-    const s = await window.api.invoke('settings:get')
+    const s = await api.invoke('settings:get')
     if (s) settings.value = { quality: s.quality ?? '320', concurrency: s.concurrency ?? 2, downloadDir: s.downloadDir ?? '', lyricMode: s.lyricMode ?? 'both', decryptOutDir: s.decryptOutDir ?? '' }
   } catch {
     // 读取失败则保留默认值
@@ -43,7 +44,7 @@ onUnmounted(() => {
 /** 改动即保存：目录输入走独立 dirTimer 防抖 400ms；其余设置走 saveTimer，互不清理对方的定时器 */
 function save(patch: Partial<UiSettings>, delay = 0): void {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
-  saveTimer = setTimeout(() => { saveTimer = null; void window.api.invoke('settings:set', patch) }, delay)
+  saveTimer = setTimeout(() => { saveTimer = null; void api.invoke('settings:set', patch) }, delay)
 }
 
 function setQuality(q: UiSettings['quality']): void {
@@ -59,14 +60,14 @@ function setConcurrency(n: number): void {
 function setDir(v: string): void {
   settings.value.downloadDir = v
   if (dirTimer) { clearTimeout(dirTimer); dirTimer = null }
-  dirTimer = setTimeout(() => { dirTimer = null; void window.api.invoke('settings:set', { downloadDir: v }) }, 400)
+  dirTimer = setTimeout(() => { dirTimer = null; void api.invoke('settings:set', { downloadDir: v }) }, 400)
 }
 
 /** 解密输出目录：与下载目录同款独立防抖（互不清理对方的定时器） */
 function setDecryptDir(v: string): void {
   settings.value.decryptOutDir = v
   if (decryptDirTimer) { clearTimeout(decryptDirTimer); decryptDirTimer = null }
-  decryptDirTimer = setTimeout(() => { decryptDirTimer = null; void window.api.invoke('settings:set', { decryptOutDir: v }) }, 400)
+  decryptDirTimer = setTimeout(() => { decryptDirTimer = null; void api.invoke('settings:set', { decryptOutDir: v }) }, 400)
 }
 
 function setLyricMode(m: UiSettings['lyricMode']): void {
@@ -81,11 +82,11 @@ function pickDir(e: Event): void {
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
-  const candidate = window.api.getPathForFile(f)
+  const candidate = api.getPathForFile(f)
   if (candidate) {
     if (dirTimer) { clearTimeout(dirTimer); dirTimer = null } // 覆盖未落地的防抖输入
     settings.value.downloadDir = candidate
-    void window.api.invoke('settings:set', { downloadDir: candidate })
+    void api.invoke('settings:set', { downloadDir: candidate })
     dirNotice.value = '已选择下载目录'
   } else {
     dirNotice.value = '未能读取所选文件夹路径，请在输入框中手动粘贴完整路径'
@@ -97,11 +98,11 @@ function pickDecryptDir(e: Event): void {
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
-  const candidate = window.api.getPathForFile(f)
+  const candidate = api.getPathForFile(f)
   if (candidate) {
     if (decryptDirTimer) { clearTimeout(decryptDirTimer); decryptDirTimer = null }
     settings.value.decryptOutDir = candidate
-    void window.api.invoke('settings:set', { decryptOutDir: candidate })
+    void api.invoke('settings:set', { decryptOutDir: candidate })
   }
 }
 </script>
