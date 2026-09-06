@@ -5,6 +5,7 @@ export interface UiTrack {
   mediaMid?: string; duration?: number; vip?: boolean
 }
 export type UiQuality = 'flac' | 'ape' | '320' | '128' | 'm4a'
+export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
 
 export interface UiQueueJob {
   id: string; source: string; state: string; progress: number
@@ -16,6 +17,7 @@ export const useDownloadStore = defineStore('download', {
     tracks: [] as UiTrack[],
     selectedIds: new Set<string>(),
     quality: '320' as UiQuality,
+    lyricMode: 'both' as UiLyricMode,
     queue: [] as UiQueueJob[],
     loggedIn: false,
     uin: '',
@@ -29,6 +31,7 @@ export const useDownloadStore = defineStore('download', {
     selectAll() { this.selectedIds = new Set(this.tracks.map((t) => t.id)) },
     clear() { this.selectedIds = new Set() },
     setQuality(q: UiQuality) { this.quality = q },
+    setLyricMode(m: UiLyricMode) { this.lyricMode = m },
     setLogin(ok: boolean, uin: string) { this.loggedIn = ok; this.uin = uin },
     /** 队列事件镜像：主进程推来的 job 快照 → queue 列表（upsert by id） */
     onQueueEvent(job: any) {

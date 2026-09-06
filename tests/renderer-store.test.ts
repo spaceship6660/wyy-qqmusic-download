@@ -40,4 +40,13 @@ describe('download store', () => {
     expect(s.queue[0].source).toBe('netease')
     expect(s.queue[0].name).toBe('N')
   })
+
+  it('歌词模式默认 both，setLyricMode 生效（下载时选择契约）', () => {
+    const s = useDownloadStore()
+    expect(s.lyricMode).toBe('both')
+    s.setLyricMode('lrc')
+    expect(s.lyricMode).toBe('lrc')
+    s.setLyricMode('none')
+    expect(s.lyricMode).toBe('none')
+  })
 })

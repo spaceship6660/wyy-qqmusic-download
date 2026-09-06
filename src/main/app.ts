@@ -90,10 +90,11 @@ export function createApp(deps: AppDeps) {
       if (fresh.downgraded) job.downgraded = true
       await doDownload(fresh.url, dest)
     }
-    // 3) 标签（歌词内嵌/另存受 settings.lyricMode 控制：both=内嵌+另存、embed=仅内嵌、
-    //    lrc=仅另存、none=不保存——tagFile 的 saveLrc 参数已有区分；歌词接口失败返回空串不阻塞）；
+    // 3) 标签（歌词内嵌/另存受「本批 lyricMode」（缺省回退 settings.lyricMode）控制：both=内嵌+另存、
+    //    embed=仅内嵌、lrc=仅另存、none=不保存——tagFile 的 saveLrc 参数已有区分；歌词接口失败返回空串不阻塞）；
     //    失败时清理已下载文件（含 .lrc）防堆积
     try {
+      const lyricMode = job.lyricMode ?? settings.lyricMode
       const detail = await spec.fetchDetail()
       const cover = await fetchCover(job.track.cover, fetchImpl)
       const meta = {
@@ -103,11 +104,11 @@ export function createApp(deps: AppDeps) {
         date: detail.date,
         copyright: '',
         genre: '',
-        lyrics: settings.lyricMode !== 'none' ? await spec.fetchLyrics() : '',
+        lyrics: lyricMode !== 'none' ? await spec.fetchLyrics() : '',
         cover: cover?.data,
         coverMime: cover?.mime,
       }
-      await tagFile(dest, meta, { saveLrc: settings.lyricMode === 'both' || settings.lyricMode === 'lrc' })
+      await tagFile(dest, meta, { saveLrc: lyricMode === 'both' || lyricMode === 'lrc' })
     } catch (e) {
       fs.rmSync(dest, { force: true })
       fs.rmSync(dest.replace(/\.(mp3|flac|ape|m4a)$/i, '.lrc'), { force: true })
@@ -166,8 +167,8 @@ export function createApp(deps: AppDeps) {
       if (kind.kind === 'album') return { kind, tracks: await fetchAlbum(client, kind.id) }
       return null
     },
-    enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; source: 'qq' | 'netease' }) => {
-      const { tracks, quality, source } = payload
+    enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; lyricMode?: Settings['lyricMode']; source: 'qq' | 'netease' }) => {
+      const { tracks, quality, lyricMode, source } = payload
       // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
@@ -179,7 +180,7 @@ export function createApp(deps: AppDeps) {
             return true
           })
           .map((t) => ({
-            id: t.id, source, track: t, quality, state: 'queued' as const, progress: 0,
+            id: t.id, source, track: t, quality, lyricMode, state: 'queued' as const, progress: 0,
           })),
       )
       return true

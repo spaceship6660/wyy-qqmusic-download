@@ -6,9 +6,11 @@ import QueuePanel from './components/QueuePanel.vue'
 import LoginButton from './components/LoginButton.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import NeteaseTab from './components/NeteaseTab.vue'
+import DownloadOptions from './components/DownloadOptions.vue'
 import { useDownloadStore } from './stores/download'
 
-const tab = ref<'download' | 'decrypt' | 'netease' | 'settings'>('download')
+// 左侧导航：QQ 音乐下载 / 网易云下载 同级两块；解密、设置并列
+const tab = ref<'qq' | 'netease' | 'decrypt' | 'settings'>('qq')
 const store = useDownloadStore()
 const q = ref('')
 
@@ -33,14 +35,21 @@ async function doSearch(): Promise<void> {
 
 function enqueue(): void {
   const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
-  if (selected.length) void window.api.invoke('dl:enqueue', { tracks: selected, quality: store.quality, source: 'qq' })
+  if (selected.length) {
+    void window.api.invoke('dl:enqueue', {
+      tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'qq',
+    })
+  }
   store.clear()
 }
 
 onMounted(() => {
   void window.api.invoke('auth:status').then((s: any) => store.setLogin(!!s?.loggedIn, s?.uin ?? ''))
-  // 持久化码率 → store（store 是展示/入队的单一事实源，与磁盘初值对齐）
-  void window.api.invoke('settings:get').then((s: any) => { if (s?.quality) store.setQuality(s.quality) })
+  // 设置的码率/歌词模式只是默认值：启动时载入 store 作为当前下载选择
+  void window.api.invoke('settings:get').then((s: any) => {
+    if (s?.quality) store.setQuality(s.quality)
+    if (s?.lyricMode) store.setLyricMode(s.lyricMode)
+  })
   window.api.on('dl:jobStart', store.onQueueEvent)
   window.api.on('dl:progress', store.onQueueEvent)
   window.api.on('dl:done', store.onQueueEvent)
@@ -50,23 +59,26 @@ onMounted(() => {
 
 <template>
   <div class="app">
-    <header>
-      <h1>QQ 音乐下载器</h1>
-      <LoginButton
-        :logged-in="store.loggedIn"
-        :uin="store.uin"
-        @changed="(s: any) => store.setLogin(s.loggedIn, s.uin ?? '')"
-      />
+    <aside class="sidebar">
+      <h1>音乐下载器</h1>
       <nav>
-        <button :class="{ active: tab === 'download' }" @click="tab = 'download'">下载</button>
+        <button :class="{ active: tab === 'qq' }" @click="tab = 'qq'">QQ 音乐下载</button>
+        <button :class="{ active: tab === 'netease' }" @click="tab = 'netease'">网易云下载</button>
         <button :class="{ active: tab === 'decrypt' }" @click="tab = 'decrypt'">解密</button>
-        <button :class="{ active: tab === 'netease' }" @click="tab = 'netease'">网易云</button>
         <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">设置</button>
       </nav>
-    </header>
-    <main>
-      <section v-if="tab === 'download'">
+      <div class="sidebar-foot">
+        <LoginButton
+          :logged-in="store.loggedIn"
+          :uin="store.uin"
+          @changed="(s: any) => store.setLogin(s.loggedIn, s.uin ?? '')"
+        />
+      </div>
+    </aside>
+    <main class="content">
+      <section v-if="tab === 'qq'">
         <SearchBar v-model="q" @search="doSearch" />
+        <DownloadOptions />
         <div class="action-row">
           <button @click="store.selectAll()">全选</button>
           <button @click="store.clear()">清空</button>
@@ -83,8 +95,8 @@ onMounted(() => {
         />
         <QueuePanel :queue="store.queue" />
       </section>
-      <section v-else-if="tab === 'decrypt'">解密（后续计划）</section>
       <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
+      <section v-else-if="tab === 'decrypt'">解密（后续计划）</section>
       <section v-else><SettingsPanel /></section>
     </main>
   </div>
@@ -92,25 +104,37 @@ onMounted(() => {
 
 <style>
 body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; background: #f7f8fa; color: #222; }
-.app { padding: 16px; }
-header { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
-header h1 { font-size: 20px; margin: 0; }
-nav { margin-left: auto; display: flex; gap: 8px; }
-nav button {
-  padding: 6px 18px;
-  font-size: 14px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
+.app { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 190px;
+  flex-shrink: 0;
+  padding: 16px 12px;
   background: #fff;
+  border-right: 1px solid #e6e8ec;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.sidebar h1 { font-size: 17px; margin: 0; padding: 0 8px; }
+.sidebar nav { display: flex; flex-direction: column; gap: 6px; }
+.sidebar nav button {
+  padding: 10px 14px;
+  font-size: 14px;
+  text-align: left;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   cursor: pointer;
   color: #444;
 }
-nav button.active {
+.sidebar nav button:hover { background: #f0f3f5; }
+.sidebar nav button.active {
   font-weight: 700;
   color: #fff;
   background: #31c27c;
-  border-color: #31c27c;
 }
+.sidebar-foot { margin-top: auto; }
+.content { flex: 1; padding: 20px 24px; min-width: 0; }
 .action-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .action-row button {
   padding: 6px 16px;

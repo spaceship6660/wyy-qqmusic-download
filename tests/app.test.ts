@@ -276,4 +276,22 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     // ID 校验在创建下载目录之前抛出 → 目录可能不存在；存在则必须为空
     expect(fs.existsSync(env.dl) ? fs.readdirSync(env.dl) : []).toEqual([])
   })
+
+  it('N1b: per-batch lyricMode 覆盖设置默认（enqueue lyricMode:none → 不内嵌歌词）', async () => {
+    // settings 默认 both（会内嵌歌词），但本批显式传 none → 产物无歌词
+    const env = await makeEnv({ lyricMode: 'both' })
+    env.app.enqueue({
+      tracks: [{ id: '123', name: '测试歌', artist: '测试手', album: '测试专', cover: '' }],
+      quality: '320',
+      lyricMode: 'none',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    const files = fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))
+    expect(files.length).toBe(1)
+    const mm = await parseFile(path.join(env.dl, files[0]))
+    expect(mm.common.title).toBe('测试歌')
+    expect(mm.common.lyrics).toBeUndefined() // lyricMode=none → 不取歌词也不内嵌
+  })
 })

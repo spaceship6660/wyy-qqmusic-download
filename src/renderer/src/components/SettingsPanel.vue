@@ -60,6 +60,7 @@ function setDir(v: string): void {
 
 function setLyricMode(m: UiSettings['lyricMode']): void {
   settings.value.lyricMode = m
+  store.setLyricMode(m) // 与码率一致：store 为当前下载选择的单一事实源，改了默认值即同步当前选择
   save({ lyricMode: m })
 }
 
@@ -86,7 +87,7 @@ function pickDir(e: Event): void {
     <h3>设置</h3>
     <div v-if="loaded" class="form">
       <div class="field">
-        <span class="label">码率</span>
+        <span class="label">默认码率（下载时可改）</span>
         <div class="radios">
           <label v-for="q in (['320', '128', 'm4a', 'flac', 'ape'] as const)" :key="q">
             <input type="radio" :value="q" :checked="store.quality === q" @change="setQuality(q)" />
@@ -115,7 +116,7 @@ function pickDir(e: Event): void {
         <div v-if="dirNotice" class="notice">{{ dirNotice }}</div>
       </div>
       <div class="field">
-        <span class="label">歌词模式</span>
+        <span class="label">默认歌词模式（下载时可改）</span>
         <div class="radios">
           <label v-for="m in ([{ v: 'both', t: '嵌入 + 另存 .lrc' }, { v: 'embed', t: '仅嵌入' }, { v: 'lrc', t: '仅另存 .lrc' }, { v: 'none', t: '不保存歌词' }] as const)" :key="m.v">
             <input type="radio" :value="m.v" :checked="settings.lyricMode === m.v" @change="setLyricMode(m.v)" />

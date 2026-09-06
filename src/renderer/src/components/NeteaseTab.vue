@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
+import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
 
 interface NePlaylist { id: number; name: string; liked: boolean; trackCount: number }
@@ -63,7 +64,9 @@ function selectAll(): void {
 function enqueue(): void {
   const selected = currentTracks.value.filter((t) => selectedIds.value.has(t.id))
   if (selected.length) {
-    void window.api.invoke('dl:enqueue', { tracks: selected, quality: store.quality, source: 'netease' })
+    void window.api.invoke('dl:enqueue', {
+      tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'netease',
+    })
     selectedIds.value = new Set()
   }
 }
@@ -109,6 +112,7 @@ onMounted(() => {
       <input v-model="q" placeholder="歌名 / 歌手" @keyup.enter="doSearch" />
       <button class="ghost" @click="doSearch">搜索</button>
     </div>
+    <DownloadOptions />
     <aside v-if="loggedIn" class="playlists">
       <h3>我的歌单</h3>
       <ul>

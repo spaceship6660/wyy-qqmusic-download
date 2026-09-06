@@ -8,6 +8,7 @@ export interface DownloadJob {
   source: 'qq' | 'netease'      // T10 runner 按它选直链层（P2 网易云复用）
   track: TrackDTO
   quality: Quality
+  lyricMode?: 'both' | 'embed' | 'lrc' | 'none'   // 本批歌词模式；缺省时 runner 回退 settings.lyricMode
   state: JobState
   progress: number          // 0-100
   error?: string
