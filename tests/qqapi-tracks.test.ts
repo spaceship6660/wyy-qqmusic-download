@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -91,5 +91,12 @@ describe('歌单/专辑', () => {
     const entries = await fetchAlbum(client, '000gXCTb2AhRR1')
     expect(entries.length).toBeGreaterThan(0)
     expect(entries[0].album).toBeTruthy()
+  })
+})
+describe('qqCoverUrl（2026-09-06：搜索响应只有 pmid）', () => {
+  it('pmid 拼标准封面 URL；picUrl 优先；都没有则空串', () => {
+    expect(qqCoverUrl({ album: { pmid: '002dgkGb2BeT3R_2' } })).toBe('https://y.gtimg.cn/music/photo_new/T002R300x300M000002dgkGb2BeT3R_2.jpg')
+    expect(qqCoverUrl({ album: { pmid: 'X', picUrl: 'http://a/b.jpg' } })).toBe('http://a/b.jpg')
+    expect(qqCoverUrl({ album: {} })).toBe('')
   })
 })

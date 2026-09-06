@@ -46,10 +46,20 @@ export async function searchTracks(client: QqClient, query: string, opts: { limi
     name: s.name ?? '',
     artist: artistOf(s),
     album: s?.album?.name ?? '',
-    cover: s?.album?.picUrl ?? s?.pic ?? '',
+    // 2026-09-06 实测：搜索响应 album 只有 pmid（picUrl/pic 均缺）——用 pmid 拼标准封面 URL
+    cover: qqCoverUrl(s),
     mediaMid: s?.file?.media_mid,
     duration: typeof s?.interval === 'number' ? s.interval : undefined,
   }))
+}
+
+/** QQ 音乐封面 URL：picUrl 直取；否则按 pmid 拼 T002R300x300M000 规格 */
+export function qqCoverUrl(s: any): string {
+  const picUrl = s?.album?.picUrl ?? s?.pic ?? s?.picUrl
+  if (typeof picUrl === 'string' && picUrl) return picUrl
+  const pmid = s?.album?.pmid
+  if (typeof pmid === 'string' && pmid) return `https://y.gtimg.cn/music/photo_new/T002R300x300M000${pmid}.jpg`
+  return ''
 }
 
 export async function getTrackDetail(client: QqClient, mid: string): Promise<TrackDetail> {
