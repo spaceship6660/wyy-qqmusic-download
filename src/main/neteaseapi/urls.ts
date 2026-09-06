@@ -27,12 +27,11 @@ export async function neGetAudioUrl(
     if (url) return { url, quality: q, downgraded: !supported || i > startIdx }
   }
   throw new QqApiError(
-    // 2026-09-06 实测：匿名下所有歌曲直链均 url:null（code 404）——网易云已收紧匿名下载
-    // （2026-09-04 验收时 320k 尚可用，同日收紧与 QQ 匿名收紧同期）；已登录仍失败才是
-    // 版权/VIP 问题。文案按登录态分流，引导用户先扫码再下载。
+    // 2026-09-06 真实网络冒烟：普通歌匿名 320k 可下（code 200）；个别版权歌匿名 url
+    // 404（如周杰伦类），登录后可下。文案按登录态分流，避免「会员」误导。
     client.getCookie()
-      ? '未拿到可播放 URL（可能无版权/未上架，VIP 歌需会员权益）'
-      : '网易云下载需登录：匿名直链已被服务端收紧（2026-09-06），请先扫码登录；VIP 歌还需会员权益',
+      ? '未拿到可播放 URL（可能无版权/未上架，或账号无对应权益）'
+      : '未拿到可播放 URL（匿名仅可下普通歌；此歌可能需登录，登录后可下载更多）',
     'no-playable-url',
   )
 }
