@@ -58,14 +58,13 @@ function durText(sec?: number): string {
         </div>
       </article>
     </div>
-    <div v-else class="empty">暂无结果</div>
-  </div>
-    <div v-if="loadMore && tracks.length" class="load-more">
-      <button :disabled="loadingMore" @click="emit('loadMore')">
-        {{ loadingMore ? '加载中…' : `加载更多（已显示 ${tracks.length}${loadMoreTotal ? ' / ' + loadMoreTotal : ''}）` }}
-      </button>
-    </div>
-  </div>
+<div v-else class="empty">暂无结果</div>
+	    <div v-if="loadMore && tracks.length" class="load-more">
+	      <button :disabled="loadingMore" @click="emit('loadMore')">
+	        {{ loadingMore ? '加载中…' : `加载更多（已显示 ${tracks.length}${loadMoreTotal ? ' / ' + loadMoreTotal : ''}）` }}
+	      </button>
+	    </div>
+	  </div>
 </template>
 
 <style scoped>
