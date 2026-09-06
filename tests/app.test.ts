@@ -48,7 +48,7 @@ async function startServer(delayMs = 0) {
  *   （postMusicu 路径缺失 → QqApiError）。
  * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
  */
-function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean }) {
+function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[] }) {
   let vkeyCalls = 0
   return vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
@@ -103,6 +103,10 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
           { status: 200 },
         )
       }
+      if (body.req?.method === 'DoSearchForQQMusicDesktop') {
+        // 解密补全用的搜索命中（unlock 用例）
+        return new Response(JSON.stringify({ req: { code: 0, data: { body: { song: { list: opts.searchHits ?? [] } } } } }), { status: 200 })
+      }
     }
     return new Response('{}', { status: 404 })
   }) as unknown as typeof fetch
@@ -126,7 +130,7 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[] } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
@@ -134,7 +138,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
     JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0)
-  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken })
+  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits })
   const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[] }
   const app = createApp({
     userDataDir: dir,
@@ -293,5 +297,68 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     const mm = await parseFile(path.join(env.dl, files[0]))
     expect(mm.common.title).toBe('测试歌')
     expect(mm.common.lyrics).toBeUndefined() // lyricMode=none → 不取歌词也不内嵌
+  })
+})
+describe('unlockRun 解密补全管线', () => {
+  // mflac_map 真实验证样本（raw+suffix 拼接 = 完整加密文件）
+  const QMC_FIX = path.join(__dirname, 'fixtures', 'qmc')
+  function encMflacMap(): Buffer {
+    return Buffer.concat([
+      fs.readFileSync(path.join(QMC_FIX, 'mflac_map_raw.bin')),
+      fs.readFileSync(path.join(QMC_FIX, 'mflac_map_suffix.bin')),
+    ])
+  }
+
+  async function makeUnlockEnv(searchHits: any[]) {
+    const env = await makeEnv({ searchHits })
+    // 解密输出目录指向 env.dl（afterEach 统一清理）
+    env.app.settingsSet({ decryptOutDir: env.dl })
+    return env
+  }
+
+  it('搜索命中 → 解密 + 补全（flac 标签含歌名/歌手），输出规范文件名', async () => {
+    const env = await makeUnlockEnv([
+      { mid: 'M1', name: '歌曲乙', singer: [{ name: '歌手甲' }], album: { name: '专辑丙', picUrl: '' }, file: { media_mid: 'X' } },
+    ])
+    const enc = path.join(env.dir, '歌手甲 - 歌曲乙.mflac')
+    fs.writeFileSync(enc, encMflacMap())
+
+    const results = await env.app.unlockRun([enc])
+    expect(results.length).toBe(1)
+    expect(results[0].status).toBe('completed')
+
+    const out = results[0].outputPath!
+    expect(path.basename(out)).toBe('歌曲乙 - 歌手甲.flac') // 规范「歌名 - 歌手」
+    const mm = await parseFile(out)
+    expect(mm.common.title).toBe('歌曲乙')
+    expect(mm.common.artist).toBe('歌手甲')
+    expect(mm.common.album).toBe('专辑丙')
+  })
+
+  it('搜索未命中 → 仅解密（保留原名 .flac），reason 说明', async () => {
+    const env = await makeUnlockEnv([])
+    const enc = path.join(env.dir, '神秘歌 - 神秘人.mflac')
+    fs.writeFileSync(enc, encMflacMap())
+
+    const results = await env.app.unlockRun([enc])
+    expect(results[0].status).toBe('decrypted')
+    expect(results[0].reason).toContain('搜索未命中')
+    expect(path.basename(results[0].outputPath!)).toBe('神秘歌 - 神秘人.flac')
+    // 解密结果 = 目标明文
+    expect(fs.readFileSync(results[0].outputPath!).equals(fs.readFileSync(path.join(QMC_FIX, 'mflac_map_target.bin')))).toBe(true)
+  })
+
+  it('不支持的扩展名与 musicex → failed 且不落盘', async () => {
+    const env = await makeUnlockEnv([])
+    const bad = path.join(env.dir, 'x.mp3')
+    fs.writeFileSync(bad, 'fake')
+    const musicex = path.join(env.dir, 'y.mflac')
+    fs.writeFileSync(musicex, Buffer.concat([encMflacMap(), Buffer.from('cex\0')]))
+
+    const results = await env.app.unlockRun([bad, musicex])
+    expect(results.map((r) => r.status)).toEqual(['failed', 'failed'])
+    expect(results[0].reason).toContain('不支持的扩展名')
+    expect(results[1].reason).toContain('musicex')
+    expect(fs.readdirSync(env.dl)).toEqual([]) // 输出目录零文件
   })
 })

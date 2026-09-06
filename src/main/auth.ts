@@ -178,6 +178,7 @@ export function createAuth(options: AuthOptions): Auth {
   async function startQr(): Promise<QrSession> {
     // 1) 出二维码（参考自 Spica qqmusic.py:304-331）：GET ptqrshow，响应体 = PNG 字节，
     //    qrsig 从 Set-Cookie 取；返回 base64 data URL。
+    dbg('===== 新登录尝试开始 =====')
     const params = new URLSearchParams({
       appid: APPID,
       e: '2',
