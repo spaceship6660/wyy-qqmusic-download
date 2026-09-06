@@ -1,7 +1,14 @@
 import type { TrackDTO } from '../qqapi/tracks'
 import type { NeClient } from './client'
 
-export interface PlaylistDTO { id: number; name: string; liked: boolean; trackCount: number }
+export interface PlaylistDTO {
+  id: number
+  name: string
+  liked: boolean          // specialType=5（我喜欢的音乐）
+  subscribed?: boolean    // 收藏的歌单
+  creatorUid?: number     // 歌单创建者 uid（= 我 → 自建）
+  trackCount: number
+}
 export interface NeTrackDetail { date: string }
 export interface NePlaylistResult { tracks: TrackDTO[]; requiresLogin: boolean }
 
@@ -35,6 +42,8 @@ export async function neUserPlaylist(client: NeClient, uid: number): Promise<Pla
       id: p.id,
       name: p.name ?? '',
       liked: p.specialType === 5,
+      subscribed: !!p.subscribed,
+      creatorUid: p.creator?.userId ?? 0,
       trackCount: p.trackCount ?? 0,
     }))
   return list.sort((a, b) => Number(b.liked) - Number(a.liked))
@@ -79,4 +88,60 @@ export async function neAccount(client: NeClient): Promise<NeAccount | null> {
   } catch {
     return null
   }
+}
+
+// --- 2026-09-06 新增：专辑搜索/详情 + 歌单全量分页 ---
+
+export interface NeAlbumDTO {
+  id: number
+  name: string
+  artist: string
+  cover: string
+  songCount?: number
+}
+
+/** 专辑搜索（cloudsearch type=10 → result.albums） */
+export async function neSearchAlbums(client: NeClient, q: string): Promise<NeAlbumDTO[]> {
+  const json = await client.getJson<{ result?: { albums?: any[] } }>(
+    `https://music.163.com/api/cloudsearch/pc?type=10&s=${encodeURIComponent(q)}&limit=20&offset=0`,
+  )
+  return (json?.result?.albums ?? [])
+    .filter((a) => a?.id)
+    .map((a) => ({
+      id: a.id,
+      name: a.name ?? '',
+      artist: a.artist?.name ?? '',
+      cover: a.picUrl ?? '',
+      songCount: a.size ?? undefined,
+    }))
+}
+
+/** 专辑歌曲（api/v1/album/{id} → songs；2026-09-06 实测可用，api/album?id= 已下线） */
+export async function neAlbumSongs(client: NeClient, id: number): Promise<TrackDTO[]> {
+  const json = await client.getJson<{ songs?: any[] }>(`https://music.163.com/api/v1/album/${id}`)
+  return (json?.songs ?? []).filter((t) => t?.id).map(neteaseTrackToDto)
+}
+
+export interface NePlaylistPage {
+  tracks: TrackDTO[]
+  total: number
+  more: boolean
+}
+
+/** 歌单全量分页（2026-09-06 定型）：v6/detail 的 trackIds 匿名即全量（如 200/125/1581），
+ * 歌曲明细用 song/detail 批量拉（实测 50 ids 一次 200 OK；页大小 500 防超长 URL） */
+export async function nePlaylistPage(client: NeClient, id: string, offset: number, pageSize = 500): Promise<NePlaylistPage | null> {
+  const meta = await client.getJson<{ playlist?: { trackCount?: number; trackIds?: Array<{ id: number }> } }>(
+    `https://music.163.com/api/v6/playlist/detail/?id=${id}`,
+  )
+  const ids = (meta?.playlist?.trackIds ?? []).map((t) => t.id).filter((x): x is number => typeof x === 'number')
+  const total = meta?.playlist?.trackCount ?? ids.length
+  if (ids.length === 0) return null
+  const batch = ids.slice(offset, offset + pageSize)
+  if (batch.length === 0) return { tracks: [], total, more: false }
+  const json = await client.getJson<{ songs?: any[] }>(
+    `https://music.163.com/api/song/detail?ids=[${batch.join(',')}]`,
+  )
+  const tracks = (json?.songs ?? []).filter((t) => t?.id).map(neteaseTrackToDto)
+  return { tracks, total, more: offset + batch.length < ids.length }
 }

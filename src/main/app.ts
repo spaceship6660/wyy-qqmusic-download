@@ -1,12 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, TrackDTO, Quality } from './qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, searchAlbums, TrackDTO, Quality } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
+import { getUserPlaylists, getFavPlaylists, getDissTracksPage } from './qqapi/playlists'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
 import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
+import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
 import { createNeAuth } from './neteaseAuth'
 import { DownloadQueue, DownloadJob } from './downloader/queue'
@@ -232,6 +234,24 @@ export function createApp(deps: AppDeps) {
 
   return {
     search: (q: string) => searchTracks(client, q),
+    qqAlbumSearch: (q: string) => searchAlbums(client, q),
+    qqAlbumSongs: (mid: string) => fetchAlbum(client, mid),
+    // QQ 登录态歌单（2026-09-06 补全：我喜欢的音乐 + 创建/收藏歌单，点开批量下载）
+    qqUserPlaylists: () => {
+      const uin = auth.getStatus().uin?.replace(/^o/i, '') ?? ''
+      return uin ? getUserPlaylists(client, uin) : []
+    },
+    qqFavPlaylists: () => {
+      const euin = auth.getEncHostUin()
+      return euin ? getFavPlaylists(client, euin) : []
+    },
+    qqDissTracks: (params: { disstid?: number; dirid?: number; songBegin?: number }) =>
+      getDissTracksPage(client, {
+        disstid: params.disstid,
+        dirid: params.dirid,
+        euin: auth.getEncHostUin() || undefined,
+        songBegin: params.songBegin ?? 0,
+      }),
     parseLink: async (url: string) => {
       const kind = parseLink(url)
       if (!kind) return null
@@ -285,6 +305,9 @@ export function createApp(deps: AppDeps) {
       return { loggedIn: s.state === 'loggedIn', uin: s.uin }
     },
     neSearch: (q: string) => neSearch(neClient, q),
+    neAlbumSearch: (q: string) => neSearchAlbums(neClient, q),
+    neAlbumSongs: (id: number) => neAlbumSongs(neClient, id),
+    nePlaylistPage: (params: { id: string; offset: number }) => nePlaylistPage(neClient, params.id, params.offset ?? 0),
     neAccount: () => neAccount(neClient),
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),

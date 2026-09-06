@@ -11,7 +11,12 @@ export interface QrSession { qrDataUrl: string } // data:image/png;base64,...
 export type QrPollStatus = 'waiting' | 'scanned' | 'success' | 'expired' | 'rejected'
 export type AuthState = 'anonymous' | 'waiting' | 'loggedIn' | 'failed'
 export interface AuthStatus { state: AuthState; uin?: string; error?: string }
-export interface AuthCookie { uin: string; cookie: string }
+export interface AuthCookie {
+  uin: string
+  cookie: string
+  /** 登录响应 EncryptUin（QQ 音乐「我喜欢的音乐/收藏歌单」接口的加密 UIN；扫码登录才有） */
+  encHostUin?: string
+}
 
 export interface AuthOptions {
   qqClient: QqClient       // createQqClient 产物；登录成功后调 qqClient.setAuth({uin, cookie})
@@ -30,6 +35,7 @@ export interface Auth {
   waitForResult(timeoutMs: number): Promise<AuthResult>
   importCookie(cookieHeader: string): boolean
   getStatus(): AuthStatus
+  getEncHostUin(): string
   clear(): void
 }
 
@@ -433,12 +439,14 @@ export function createAuth(options: AuthOptions): Auth {
       const musicid = String(credential.musicid ?? '')
       const musickey = String(credential.musickey ?? '')
       if (!musicid || !musickey) return die('QQ 登录成功但未取到播放凭证')
-      dbg(`QQLogin: musicid/musickey 已取得（uin=${musicid}）`)
+      // EncryptUin：QQ 歌单接口（CgiGetDiss dirid=201 / CgiGetPlaylistFavInfo）必需的加密 UIN
+      const encHostUin = String(credential.encHostUin ?? credential.EncryptUin ?? '')
+      dbg(`QQLogin: musicid/musickey 已取得（uin=${musicid}） encHostUin=${encHostUin ? '有' : '无'}`)
 
       // 7) 拼 cookie + 落盘 + setAuth（参考自 Spica qqmusic.py:508-511）
       const cookie =
         `uin=o${musicid}; qqmusic_uin=o${musicid}; qm_keyst=${musickey}; qqmusic_key=${musickey}`
-      const authCookie: AuthCookie = { uin: `o${musicid}`, cookie }
+      const authCookie: AuthCookie = { uin: `o${musicid}`, cookie, ...(encHostUin ? { encHostUin } : {}) }
       persist(authCookie)
       qqClient.setAuth(authCookie)
       qrsig = '' // 终态：qrsig 作废，防再次轮询
@@ -475,6 +483,10 @@ export function createAuth(options: AuthOptions): Auth {
     resetSession()
     sessionState = 'loggedIn'
     return true
+  }
+
+  function getEncHostUin(): string {
+    return readCookieFile()?.encHostUin ?? ''
   }
 
   function getStatus(): AuthStatus {
@@ -533,5 +545,5 @@ export function createAuth(options: AuthOptions): Auth {
     return { ok: false, reason }
   }
 
-  return { startQr, poll, waitForResult, importCookie, getStatus, clear }
+  return { startQr, poll, waitForResult, importCookie, getStatus, getEncHostUin, clear }
 }

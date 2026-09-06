@@ -4,11 +4,16 @@ import type { UiTrack } from '../stores/download'
 defineProps<{
   tracks: UiTrack[]
   selectedIds: Set<string>
+  /** 懒加载（大歌单/我喜欢）：true 时显示「加载更多」；总数为空则不显示进度 */
+  loadMore?: boolean
+  loadMoreTotal?: number
+  loadingMore?: boolean
 }>()
 const emit = defineEmits<{
   toggle: [id: string]
   selectAll: []
   clear: []
+  loadMore: []
 }>()
 
 function durText(sec?: number): string {
@@ -54,6 +59,12 @@ function durText(sec?: number): string {
       </article>
     </div>
     <div v-else class="empty">暂无结果</div>
+  </div>
+    <div v-if="loadMore && tracks.length" class="load-more">
+      <button :disabled="loadingMore" @click="emit('loadMore')">
+        {{ loadingMore ? '加载中…' : `加载更多（已显示 ${tracks.length}${loadMoreTotal ? ' / ' + loadMoreTotal : ''}）` }}
+      </button>
+    </div>
   </div>
 </template>
 
@@ -119,4 +130,16 @@ function durText(sec?: number): string {
 .album { font-size: 11px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dur { font-size: 11px; color: #aaa; flex-shrink: 0; }
 .empty { padding: 40px 0; text-align: center; color: #999; }
+.load-more { display: flex; justify-content: center; padding: 14px 0; }
+.load-more button {
+  padding: 7px 22px;
+  font-size: 13px;
+  border: 1px solid #31c27c;
+  border-radius: 18px;
+  background: #fff;
+  color: #31c27c;
+  cursor: pointer;
+}
+.load-more button:hover:not(:disabled) { background: #eefaf4; }
+.load-more button:disabled { opacity: 0.6; cursor: not-allowed; }
 </style>

@@ -23,9 +23,12 @@ export const useDownloadStore = defineStore('download', {
     queue: [] as UiQueueJob[],
     loggedIn: false,
     uin: '',
+    neLoggedIn: false,
   }),
   actions: {
     setTracks(t: UiTrack[]) { this.tracks = t; this.selectedIds = new Set() },
+    /** 懒加载：追加下一批歌曲（保留现有选中） */
+    appendTracks(t: UiTrack[]) { this.tracks = [...this.tracks, ...t] },
     toggle(id: string) {
       if (this.selectedIds.has(id)) this.selectedIds.delete(id)
       else this.selectedIds.add(id)
@@ -41,6 +44,7 @@ export const useDownloadStore = defineStore('download', {
     setQuality(q: UiQuality) { this.quality = q },
     setLyricMode(m: UiLyricMode) { this.lyricMode = m },
     setLogin(ok: boolean, uin: string) { this.loggedIn = ok; this.uin = uin },
+    setNeLogin(ok: boolean) { this.neLoggedIn = ok },
     /** 队列事件镜像：主进程推来的 job 快照 → queue 列表（upsert by id） */
     onQueueEvent(job: any) {
       const idx = this.queue.findIndex((q) => q.id === job.id)

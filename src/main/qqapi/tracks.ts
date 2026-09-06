@@ -53,6 +53,31 @@ export async function searchTracks(client: QqClient, query: string, opts: { limi
   }))
 }
 
+export interface AlbumDTO {
+  mid: string
+  name: string
+  singer: string
+  cover: string
+  songCount: number
+}
+
+/** 专辑搜索（2026-09-06 实测定型）：经典 client_search_cp?t=8（DoSearchForQQMusicDesktop
+ * 的 search_type=8 实测返回空 list），字段 albumMID/albumName/albumPic/singer_list/song_count */
+export async function searchAlbums(client: QqClient, query: string, opts: { limit?: number } = {}): Promise<AlbumDTO[]> {
+  const text = await client.get(
+    `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=${opts.limit ?? 20}&w=${encodeURIComponent(query)}&t=8&format=json`,
+  )
+  const json = JSON.parse(stripJsonp(text))
+  const list = (json?.data?.album?.list ?? []) as any[]
+  return list.filter((a) => a?.albumMID).map((a) => ({
+    mid: a.albumMID,
+    name: a.albumName ?? '',
+    singer: (a.singer_list ?? []).map((x: any) => x?.name ?? '').filter(Boolean).join(' / ') || (a.singerName ?? ''),
+    cover: qqCoverUrl({ album: { pmid: a.albumPic ?? '' } }),
+    songCount: a.song_count ?? 0,
+  }))
+}
+
 /** QQ 音乐封面 URL：picUrl 直取；否则按 pmid 拼 T002R300x300M000 规格 */
 export function qqCoverUrl(s: any): string {
   const picUrl = s?.album?.picUrl ?? s?.pic ?? s?.picUrl

@@ -112,6 +112,14 @@ ${err instanceof Error ? (err.stack ?? '') : ''}
 }
 
 safeHandle('qq:search', (q: string) => appInstance.search(q))
+safeHandle('qq:userPlaylists', () => appInstance.qqUserPlaylists())
+safeHandle('qq:favPlaylists', () => appInstance.qqFavPlaylists())
+safeHandle('qq:dissTracks', (params: { disstid?: number; dirid?: number; songBegin?: number }) => appInstance.qqDissTracks(params))
+safeHandle('qq:albumSearch', (q: string) => appInstance.qqAlbumSearch(q))
+safeHandle('qq:albumSongs', (mid: string) => appInstance.qqAlbumSongs(mid))
+safeHandle('ne:albumSearch', (q: string) => appInstance.neAlbumSearch(q))
+safeHandle('ne:albumSongs', (id: number) => appInstance.neAlbumSongs(id))
+safeHandle('ne:playlistPage', (params: { id: string; offset: number }) => appInstance.nePlaylistPage(params))
 safeHandle('qq:linkTracks', (url: string) => appInstance.fetchTracksByLink(url))
 safeHandle('dl:enqueue', (payload: unknown) => appInstance.enqueue(payload as any))
 safeHandle('settings:get', () => appInstance.settingsGet())
