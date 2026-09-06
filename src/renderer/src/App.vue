@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import SearchBar from './components/SearchBar.vue'
 import TrackGrid from './components/TrackGrid.vue'
 import LoginButton from './components/LoginButton.vue'
@@ -14,6 +14,13 @@ import { useDownloadStore } from './stores/download'
 const tab = ref<'qq' | 'netease' | 'download' | 'decrypt' | 'settings'>('qq')
 const store = useDownloadStore()
 const q = ref('')
+// 入队中短暂态（按钮按压反馈：下载中 → 已加入 → 复原）
+const queueing = ref(false)
+
+// 窗口底部固定工具栏：当前 tab 的选中数 + 进行中任务数（任何页面都可见）
+const selectedCount = computed(() => (tab.value === 'qq' ? store.selectedIds.size : tab.value === 'netease' ? store.neSelectedIds.size : 0))
+const activeCount = computed(() => store.queue.filter((j) => j.state === 'queued' || j.state === 'running').length)
+const doneCount = computed(() => store.queue.filter((j) => j.state === 'done' || j.state === 'failed').length)
 
 async function doSearch(): Promise<void> {
   const text = q.value.trim()
@@ -34,15 +41,37 @@ async function doSearch(): Promise<void> {
   }
 }
 
-function enqueue(): void {
-  const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
-  if (selected.length) {
-    void window.api.invoke('dl:enqueue', {
-      tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'qq',
-    })
+/** 底部工具栏下载按钮：按当前 tab 入队；成功后自动切到「我的下载」页（可见反馈） */
+async function downloadSelected(): Promise<void> {
+  if (queueing.value || selectedCount.value === 0) return
+  queueing.value = true
+  try {
+    if (tab.value === 'qq') {
+      const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
+      if (selected.length) {
+        await window.api.invoke('dl:enqueue', {
+          tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'qq',
+        })
+        store.clear()
+        tab.value = 'download' // 入队成功 → 直接看到下载页（明确反馈）
+      }
+    } else if (tab.value === 'netease') {
+      // 入队执行在 NeteaseTab（选中集在 store.neSelectedIds）；成功后它会派发
+      // ne:download-done 通知本组件切页
+      window.dispatchEvent(new CustomEvent('ne:download-selected'))
+    }
+  } catch (e) {
+    window.alert(e instanceof Error ? e.message : String(e))
+  } finally {
+    queueing.value = false
   }
-  store.clear()
 }
+
+onMounted(() => {
+  window.addEventListener('ne:download-done', () => {
+    tab.value = 'download'
+  })
+})
 
 onMounted(() => {
   void window.api.invoke('auth:status').then((s: any) => store.setLogin(!!s?.loggedIn, s?.uin ?? ''))
@@ -88,20 +117,28 @@ onMounted(() => {
           @select-all="store.selectAll()"
           @clear="store.clear()"
         />
-        <!-- 下载操作在页面下部（列表之后） -->
-        <div class="action-row">
-          <button @click="store.selectAll()">全选</button>
-          <button @click="store.clear()">清空</button>
-          <button class="primary" :disabled="store.selectedIds.size === 0" @click="enqueue">
-            下载选中 ({{ store.selectedIds.size }}) - {{ store.quality }}
-          </button>
-        </div>
       </section>
       <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
       <section v-else-if="tab === 'download'"><DownloadPage /></section>
       <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>
+
+    <!-- 窗口底部固定工具栏：下载按钮永远可见（不用翻列表）；按下即有反馈 -->
+    <footer class="toolbar">
+      <button
+        class="download-btn"
+        :class="{ active: selectedCount > 0, queueing }"
+        :disabled="selectedCount === 0 || queueing"
+        @click="downloadSelected"
+      >
+        {{ queueing ? '加入队列中…' : `下载选中 (${selectedCount})` }}
+        <span v-if="tab === 'qq' && store.quality" class="q-badge">{{ store.quality }}</span>
+      </button>
+      <button class="count-btn" :class="{ has: activeCount > 0 }" @click="tab = 'download'">
+        {{ activeCount > 0 ? `下载中 ${activeCount}` : `已完成 ${doneCount}` }}
+      </button>
+    </footer>
   </div>
 </template>
 
@@ -137,22 +174,58 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
   background: #31c27c;
 }
 .sidebar-foot { margin-top: auto; }
-.content { flex: 1; padding: 20px 24px; min-width: 0; }
-.action-row { display: flex; gap: 8px; margin-bottom: 12px; }
-.action-row button {
-  padding: 6px 16px;
+.content { flex: 1; padding: 20px 24px 76px; min-width: 0; }
+
+/* 窗口底部固定工具栏（fixed 于视口底部，翻列表始终可见） */
+.toolbar {
+  position: fixed;
+  left: 190px; /* 对齐 sidebar 右侧 */
+  right: 0;
+  bottom: 0;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px;
+  background: #ffffff;
+  border-top: 1px solid #e6e8ec;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+  z-index: 20;
+}
+.download-btn {
+  padding: 9px 26px;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  background: #c8d2cc;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+}
+.download-btn.active { background: #31c27c; }
+.download-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.download-btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.94); }
+.download-btn:disabled { cursor: not-allowed; }
+.download-btn.queueing { background: #2ba367; }
+.q-badge {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.count-btn {
+  margin-left: auto;
+  padding: 6px 14px;
   font-size: 13px;
-  background: #fff;
   border: 1px solid #d0d0d0;
-  border-radius: 6px;
+  border-radius: 8px;
+  background: #fff;
+  color: #666;
   cursor: pointer;
 }
-.action-row button.primary {
-  background: #31c27c;
-  color: #fff;
-  border-color: #31c27c;
-}
-.action-row button.primary:disabled { background: #b9c9c0; border-color: #b9c9c0; cursor: not-allowed; }
-.action-row button:not(.primary):hover { border-color: #31c27c; color: #31c27c; }
-.action-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+.count-btn.has { color: #31c27c; border-color: #31c27c; font-weight: 600; }
+.count-btn:hover { border-color: #31c27c; color: #31c27c; }
 </style>

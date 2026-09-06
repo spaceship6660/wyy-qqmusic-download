@@ -16,6 +16,8 @@ export const useDownloadStore = defineStore('download', {
   state: () => ({
     tracks: [] as UiTrack[],
     selectedIds: new Set<string>(),
+    /** 网易云页选中（与 QQ 页分离；底部固定工具栏共用） */
+    neSelectedIds: new Set<string>(),
     quality: '320' as UiQuality,
     lyricMode: 'both' as UiLyricMode,
     queue: [] as UiQueueJob[],
@@ -30,6 +32,12 @@ export const useDownloadStore = defineStore('download', {
     },
     selectAll() { this.selectedIds = new Set(this.tracks.map((t) => t.id)) },
     clear() { this.selectedIds = new Set() },
+    neToggle(id: string) {
+      if (this.neSelectedIds.has(id)) this.neSelectedIds.delete(id)
+      else this.neSelectedIds.add(id)
+    },
+    neSelectAll(tracks: { id: string }[]) { this.neSelectedIds = new Set(tracks.map((t) => t.id)) },
+    neClear() { this.neSelectedIds = new Set() },
     setQuality(q: UiQuality) { this.quality = q },
     setLyricMode(m: UiLyricMode) { this.lyricMode = m },
     setLogin(ok: boolean, uin: string) { this.loggedIn = ok; this.uin = uin },

@@ -50,3 +50,17 @@ describe('download store', () => {
     expect(s.lyricMode).toBe('none')
   })
 })
+describe('网易云选中集（窗口底部工具栏共用）', () => {
+  it('neToggle/neSelectAll/neClear 与 QQ 选中集互不影响', () => {
+    const s = useDownloadStore()
+    s.setTracks([{ id: 'q1', name: 'Q' } as any])
+    s.toggle('q1')
+    s.neSelectAll([{ id: 'n1' }, { id: 'n2' }])
+    s.neToggle('n2')
+    expect([...s.selectedIds]).toEqual(['q1'])
+    expect([...s.neSelectedIds]).toEqual(['n1'])
+    s.neClear()
+    expect(s.neSelectedIds.size).toBe(0)
+    expect(s.selectedIds.size).toBe(1) // QQ 选中不受影响
+  })
+})

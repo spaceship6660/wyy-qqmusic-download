@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
@@ -12,7 +12,6 @@ const loggedIn = ref(false)
 const nickname = ref('')
 const playlists = ref<NePlaylist[]>([])
 const currentTracks = ref<NeTrack[]>([])
-const selectedIds = ref(new Set<string>())
 const q = ref('')
 const error = ref('')
 const cookieText = ref('')
@@ -39,7 +38,7 @@ async function openPlaylist(id: number): Promise<void> {
   error.value = ''
   const r: any = await window.api.invoke('ne:playlist', String(id))
   currentTracks.value = r.tracks ?? []
-  selectedIds.value = new Set()
+  store.neClear()
   if (r.requiresLogin && !loggedIn.value) error.value = '未登录，登录后查看完整曲目'
 }
 
@@ -47,30 +46,33 @@ async function doSearch(): Promise<void> {
   error.value = ''
   const tracks: any = await window.api.invoke('ne:search', q.value.trim())
   currentTracks.value = tracks ?? []
-  selectedIds.value = new Set()
+  store.neClear()
 }
 
 function toggleSel(id: string): void {
-  const s = new Set(selectedIds.value)
-  if (s.has(id)) s.delete(id)
-  else s.add(id)
-  selectedIds.value = s
+  store.neToggle(id)
 }
 
 function selectAll(): void {
-  selectedIds.value = new Set(currentTracks.value.map((t) => t.id))
+  store.neSelectAll(currentTracks.value)
 }
 
-function enqueue(): void {
-  const selected = currentTracks.value.filter((t) => selectedIds.value.has(t.id))
-  if (selected.length) {
-    // 匿名即可下载普通歌（2026-09-06 真实网络冒烟：320k 直链 + 完整下载通过）；
-    // 个别版权歌匿名拿不到直链，登录后可下——不拦截，失败时队列显示原因与引导
-    void window.api.invoke('dl:enqueue', {
+async function enqueue(): Promise<boolean> {
+  const selected = currentTracks.value.filter((t) => store.neSelectedIds.has(t.id))
+  if (!selected.length) return false
+  // 匿名即可下载普通歌（2026-09-06 真实网络冒烟：320k 直链 + 完整下载通过）；
+  // 个别版权歌匿名拿不到直链，登录后可下——不拦截，失败时队列显示原因与引导
+  try {
+    await window.api.invoke('dl:enqueue', {
       tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: 'netease',
     })
-    selectedIds.value = new Set()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    return false
   }
+  store.neClear()
+  window.dispatchEvent(new CustomEvent('ne:download-done'))
+  return true
 }
 
 async function openLogin(): Promise<void> {
@@ -92,7 +94,18 @@ async function doImportCookie(): Promise<void> {
 onMounted(() => {
   void refreshAuth()
   window.api.on('ne:authChanged', () => void refreshAuth())
+  window.addEventListener('ne:download-selected', onBottomDownload)
 })
+
+onUnmounted(() => {
+  window.removeEventListener('ne:download-selected', onBottomDownload)
+})
+
+/** 窗口底部工具栏「下载选中」触发（选中集在 store.neSelectedIds；执行后派发
+ *  ne:download-done 由 App 切到「我的下载」页作为可见反馈） */
+function onBottomDownload(): void {
+  void enqueue()
+}
 </script>
 
 <template>
@@ -124,14 +137,7 @@ onMounted(() => {
       </ul>
     </aside>
     <div class="grid">
-      <TrackGrid :tracks="currentTracks" :selected-ids="selectedIds" @toggle="toggleSel" />
-      <!-- 下载操作在页面下部（列表之后） -->
-      <div class="action-row">
-        <button class="primary" :disabled="selectedIds.size === 0" @click="enqueue">
-          下载选中 ({{ selectedIds.size }})
-        </button>
-        <button class="ghost" :disabled="currentTracks.length === 0" @click="selectAll">全选</button>
-      </div>
+      <TrackGrid :tracks="currentTracks" :selected-ids="store.neSelectedIds" @toggle="toggleSel" />
     </div>
   </div>
 </template>
