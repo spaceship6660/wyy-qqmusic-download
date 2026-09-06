@@ -3,8 +3,13 @@ import { join } from 'node:path'
 import { createApp } from './app'
 import { buildCookieHeader, cookieHeaderHasMusicU } from './neteaseAuth'
 
+// QQ_DIAG_LOG=<路径> 时把 QQ 登录各网络步响应摘要追加到该文件（仅登录排障用，
+// 正常使用不设置；路径建议放临时目录，用完即删，内容含部分会话凭据摘要）
+const diagLogFile = process.env['QQ_DIAG_LOG'] || undefined
+
 const appInstance = createApp({
   userDataDir: app.getPath('userData'),
+  debugLogFile: diagLogFile,
   emitEvent: (channel, payload) => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue

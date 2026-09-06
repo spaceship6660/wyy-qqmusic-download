@@ -17,6 +17,9 @@ export interface AuthOptions {
   qqClient: QqClient       // createQqClient 产物；登录成功后调 qqClient.setAuth({uin, cookie})
   fetchImpl?: typeof fetch // 默认全局 fetch；测试注入
   cookiePath: string
+  /** 诊断：非空时把登录各网络步的响应摘要（status/set-cookie/location/body 前缀）追加到该文件。
+   *  仅排障用（QQ 登录 p_skey 类问题），正常使用不设置。 */
+  debugLogFile?: string
 }
 
 export type AuthResult = { ok: true; cookie: AuthCookie } | { ok: false; reason: string }
@@ -51,6 +54,19 @@ const POLL_INTERVAL_MS = 500
 const LOGIN_TIMEOUT_MS = 30000
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** 追加一行诊断日志（仅 AuthOptions.debugLogFile 设置时生效；含时间戳） */
+function makeDbg(opts: { debugLogFile?: string }) {
+  const file = opts.debugLogFile
+  if (!file) return () => {}
+  return (line: string): void => {
+    try {
+      fs.appendFileSync(file, `[${new Date().toISOString()}] ${line}\n`, 'utf-8')
+    } catch {
+      // 诊断失败不影响登录流程
+    }
+  }
+}
+
 /** hash33（参考自 Spica qqmusic.py:107-112）。两种调用：hash33(text) 与 hash33(text, seed)。 */
 export function hash33(text: string, seed = 0): number {
   let value = seed
@@ -83,6 +99,7 @@ export function parsePtui(text: string): { code: number; msg: string; url: strin
 export function createAuth(options: AuthOptions): Auth {
   const { qqClient, cookiePath } = options
   const fetchImpl = options.fetchImpl ?? fetch
+  const dbg = makeDbg(options)
 
   let qrsig = ''
   // 跨请求累积的 Cookie（对应 Spica 的 http.cookiejar：qrsig / skey / p_skey 等）
@@ -137,6 +154,12 @@ export function createAuth(options: AuthOptions): Auth {
       const res = await fetchImpl(url, { ...init, redirect: 'manual' })
       mergeSetCookies(res)
       const body = Buffer.from(await res.arrayBuffer())
+      dbg(
+        `fetchChain hop ${hop}: status=${res.status} ` +
+          `set-cookie=${res.headers.getSetCookie().map((c) => c.split(';')[0]).join(',') || '(none)'} ` +
+          `location=${res.headers.get('location') ?? '(none)'} ` +
+          `body=${body.toString('utf8', 0, 100).replace(/\s+/g, ' ')}`,
+      )
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location')
         if (!loc) return { finalUrl: url, finalStatus: res.status, body }
@@ -175,6 +198,10 @@ export function createAuth(options: AuthOptions): Auth {
       .find((c) => c.split(';')[0].trim().startsWith('qrsig='))
     if (!qrsigCookie) throw new Error('获取 QQ 登录二维码失败（缺少 qrsig）')
     qrsig = qrsigCookie.split(';')[0].trim().slice('qrsig='.length)
+    dbg(
+      `startQr: status=${res.status} qrsig 已取得（${qrsig.length} 字符） ` +
+        `set-cookie=${res.headers.getSetCookie().map((c) => c.split(';')[0]).join(',') || '(none)'}`,
+    )
     cookieJar = `qrsig=${qrsig}`
     checkSigUrl = ''
     lastError = ''
@@ -212,7 +239,13 @@ export function createAuth(options: AuthOptions): Auth {
       signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
     })
     mergeSetCookies(res)
-    const parsed = parsePtui(await res.text())
+    const rawText = await res.text()
+    dbg(
+      `ptqrlogin: status=${res.status} ` +
+        `set-cookie=${res.headers.getSetCookie().map((c) => c.split(';')[0]).join(',') || '(none)'} ` +
+        `原始响应=${rawText.slice(0, 200)}`,
+    )
+    const parsed = parsePtui(rawText)
     if (!parsed) throw new Error('无法解析 QQ 登录状态响应。')
     switch (parsed.code) {
       case 66:
@@ -262,16 +295,25 @@ export function createAuth(options: AuthOptions): Auth {
   async function finishLogin(): Promise<AuthResult> {
     // 成/败都收敛到 terminal 态（loggedIn/failed）并作废 qrsig——UI 拿到结果后
     // poll()/waitForResult() 的会话守卫会抛错，不会再拿已消费的 qrsig 打 ptqrlogin
+    const die = (reason: string): { ok: false; reason: string } => {
+      dbg(`finishLogin 失败: ${reason}`)
+      return fail(reason)
+    }
     try {
       // 从 ptqrlogin 成功 URL 提取 uin/ptsigx（参考自 Spica qqmusic.py:390-396）
       const sigx = checkSigUrl.match(/ptsigx=([^&]+)/)
       const uinMatch = checkSigUrl.match(/uin=(\d+)/)
-      if (!sigx || !uinMatch) return fail('登录成功但缺少鉴权参数')
+      if (!sigx || !uinMatch) return die('登录成功但缺少鉴权参数')
+      dbg(`finishLogin: uin=${uinMatch[1]} ptsigx=${sigx[1].slice(0, 4)}…（${sigx[1].length} 字符）`)
 
-      // 4) check_sig 换 p_skey（参考自 Spica qqmusic.py:398-433）。Spica 的 urllib opener
-      //    默认跟随整条重定向链，cookie jar 累积每一跳的 Set-Cookie；p_skey 实际由链中
-      //    后续跳（login_jump）种下——此前 redirect:'manual' 只看首跳会漏掉它。
-      //    2026-09-04 修复：改用 fetchChain 逐跳跟随并把每跳 Set-Cookie 合并进 cookieJar。
+      // 4) check_sig 换 p_skey（参考自 Spica qqmusic.py:398-420 / L-1124 _authorize_qq_qr）。
+      //    本请求绝不能带 Cookie 头：qrsig 是 ssl.ptlogin2.qq.com 域会话，发给
+      //    ssl.ptlogin2.graph.qq.com 会让服务端改走另一套响应（不给 p_skey）——Spica 靠
+      //    urllib cookiejar 的域匹配天然不带（qqmusic.py:406-412 未写 Cookie 头），L-1124
+      //    显式 cookies={}；此前移植手拼 Cookie 头把 qrsig 误带上，真实扫码
+      //    「获取 p_skey 失败」的根因（2026-09-06 两种参考源实证）。
+      //    p_skey 在首跳 302 的 Set-Cookie 里：redirect:'manual' 只看首跳（L-1124
+      //    allow_redirects=False 同语义），不需要跟随重定向链。
       const checkParams = new URLSearchParams({
         uin: uinMatch[1],
         pttype: '1',
@@ -292,12 +334,29 @@ export function createAuth(options: AuthOptions): Auth {
         pt_light: '0',
         pt_3rd_aid: CLIENT_ID,
       })
-      const { finalUrl: checkFinal } = await fetchChain(`${CHECK_SIG_URL}?${checkParams.toString()}`, {
-        headers: { 'user-agent': LOGIN_UA, referer: XUI_REFERER, cookie: cookieJar },
+      dbg('check_sig: 发起（无 Cookie 头）')
+      const checkRes = await fetchImpl(`${CHECK_SIG_URL}?${checkParams.toString()}`, {
+        method: 'GET',
+        headers: { 'user-agent': LOGIN_UA, referer: XUI_REFERER },
+        redirect: 'manual',
         signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
       })
+      mergeSetCookies(checkRes)
+      dbg(
+        `check_sig: status=${checkRes.status} ` +
+          `set-cookie=${checkRes.headers.getSetCookie().map((c) => c.split(';')[0]).join(',') || '(none)'} ` +
+          `location=${checkRes.headers.get('location') ?? '(none)'}`,
+      )
       const pSkey = getCookie('p_skey')
-      if (!pSkey) return fail('QQ 登录获取 p_skey 失败')
+      if (!pSkey) return die('QQ 登录获取 p_skey 失败')
+      dbg(`check_sig: p_skey 已取得（长度 ${pSkey.length}）`)
+      // qrsig/ptlogin 域会话不随 authorize 外发：只保留 check_sig 换来的域 Cookie
+      // （L-1124 的 authorize 发 cookies=response.cookies，同语义）
+      cookieJar = cookieJar
+        .split(';')
+        .map((p) => p.trim())
+        .filter((p) => p && !p.startsWith('qrsig='))
+        .join('; ')
 
       // 5) OAuth authorize 换 code（参考自 Spica qqmusic.py:435-470）；
       //    g_tk = hash33(p_skey, 5381)，client_id 与 pt_3rd_aid 同值
@@ -329,7 +388,8 @@ export function createAuth(options: AuthOptions): Auth {
         signal: AbortSignal.timeout(LOGIN_TIMEOUT_MS),
       })
       const codeMatch = authFinal.match(/(?:code=)(.+?)(?:&|$)/)
-      if (!codeMatch) return fail('QQ 登录换取授权 code 失败')
+      if (!codeMatch) return die('QQ 登录换取授权 code 失败')
+      dbg(`authorize: 最终 URL 含 code（长度 ${codeMatch[1].length}）`)
 
       // 6) QQLogin 换 musicid/musickey（参考自 Spica qqmusic.py:472-507），走 client.postMusicu；
       //    comm 与 Spica 一致（g_tk 固定 5381），匿名登录
@@ -360,12 +420,14 @@ export function createAuth(options: AuthOptions): Auth {
         },
       )) as { code?: unknown; data?: Record<string, unknown> } | undefined
       if (!req || Number(req.code ?? 0) !== 0) {
-        return fail(`QQ 登录换取播放凭证失败（code=${String(req?.code ?? 0)}）`)
+        dbg(`QQLogin: 业务码异常 code=${String(req?.code ?? 0)}`)
+        return die(`QQ 登录换取播放凭证失败（code=${String(req?.code ?? 0)}）`)
       }
       const credential = req.data ?? {}
       const musicid = String(credential.musicid ?? '')
       const musickey = String(credential.musickey ?? '')
-      if (!musicid || !musickey) return fail('QQ 登录成功但未取到播放凭证')
+      if (!musicid || !musickey) return die('QQ 登录成功但未取到播放凭证')
+      dbg(`QQLogin: musicid/musickey 已取得（uin=${musicid}）`)
 
       // 7) 拼 cookie + 落盘 + setAuth（参考自 Spica qqmusic.py:508-511）
       const cookie =
@@ -378,6 +440,7 @@ export function createAuth(options: AuthOptions): Auth {
       lastError = ''
       return { ok: true, cookie: authCookie }
     } catch (err) {
+      dbg(`finishLogin 抛出: ${err instanceof Error ? err.message : String(err)}`)
       return fail(err instanceof Error ? err.message : String(err))
     }
   }

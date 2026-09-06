@@ -17,8 +17,10 @@ interface MockSeq {
   png?: Uint8Array
   /** ptqrlogin 响应文本序列；下标超出时重复最后一个 */
   login: (idx: number) => string
-  /** check_sig 重定向链首跳 302 的 location（默认指向 login_jump——p_skey 落种跳） */
+  /** check_sig 首跳 302 的 location（实现不跟随，仅 mock 完整性） */
   checkSigLocation?: string
+  /** check_sig 首跳不种 p_skey（模拟服务端异常响应 → 应报「获取 p_skey 失败」） */
+  noPkey?: boolean
   authorizeLocation?: string
   /** musicu.fcg 的 QQConnectLogin.LoginServer 响应 JSON */
   qqLogin?: unknown
@@ -26,10 +28,10 @@ interface MockSeq {
 }
 
 /**
- * 单 fetchMock 按 URL/请求体路由：ptqrshow/ptqrlogin/check_sig 链（302→login_jump）、
+ * 单 fetchMock 按 URL/请求体路由：ptqrshow/ptqrlogin/check_sig（首跳 302 + Set-Cookie p_skey）、
  * authorize 链（302→y.qq.com 200）+ musicu POST 按 module。
- * 语义对应真实 QQ 服务：check_sig 首跳是裸 302（不种 p_skey），p_skey 由链中
- * 后续 login_jump 跳的 Set-Cookie 种下——跟随整条重定向链才能收到（Spica urllib opener 行为）。
+ * 语义对应真实 QQ 服务（L-1124 allow_redirects=False 实证）：check_sig 首跳 302 的
+ * Set-Cookie 即含 p_skey，实现只取首跳、不跟随；p_skey 是唯一凭据来源。
  */
 function routerFetch(seq: MockSeq): typeof fetch {
   let loginIdx = 0
@@ -54,20 +56,21 @@ function routerFetch(seq: MockSeq): typeof fetch {
       return new Response(seq.login(loginIdx++), { status: 200 })
     }
     if (pathname === '/check_sig') {
-      // 第 1 跳：裸 302（QQ 真实行为），本跳不种 p_skey——p_skey 由链中后续 login_jump 跳种下
+      // 首跳 302 的 Set-Cookie 里直接带 p_skey（QQ 真实行为，L-1124/Spica 实证）；
+      // 实现不得带 Cookie 头请求本端点，也不跟随重定向
       return new Response('', {
         status: 302,
         headers: {
           location:
             seq.checkSigLocation ??
             'https://ssl.ptlogin2.qq.com/login_jump?jumpurl=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump',
+          ...(seq.noPkey ? {} : { 'set-cookie': 'p_skey=PSKEY123; Path=/; HttpOnly' }),
         },
       })
     }
     if (pathname === '/login_jump' || pathname === '/oauth2.0/login_jump') {
-      // check_sig 重定向链第 2 跳：p_skey 在此落种（本修复的核心回归场景；若实现只读首跳
-      // 不跟随链，p_skey 将丢失 → "QQ 登录获取 p_skey 失败"）
-      return new Response('', { status: 200, headers: { 'set-cookie': 'p_skey=PSKEY123; Path=/; HttpOnly' } })
+      // 不再跟随（redirect:'manual' 首跳即止）——保留路由仅为兜底防挂链
+      return new Response('', { status: 200 })
     }
     if (pathname === '/oauth2.0/authorize') {
       // 第 1 跳：302 → Location 指向带 code 的 y.qq.com 最终 URL
@@ -155,11 +158,11 @@ describe('createAuth', () => {
     expect(authBody).toContain('client_id=100497308')
     expect(authBody).toContain('response_type=code')
     expect(authBody).toContain('g_tk=' + h33('PSKEY123', 5381))
-    // 回归锚：p_skey 由 check_sig 链第 2 跳（login_jump）种下，fetchChain 逐跳收进 cookieJar，
-    // authorize 请求的 cookie 头必须携带它（首跳 manual 的实现到这里拿不到 p_skey）
+    // 回归锚：p_skey 由 check_sig 首跳 302 的 Set-Cookie 种下进 cookieJar，authorize 请求必须携带；
+    // qrsig 是 ptlogin2 域会话，不得随 authorize 外发（L-1124 cookies=response.cookies 同语义）
     const authCookieHeader = String((authCall?.init?.headers as Record<string, string>)['cookie'])
     expect(authCookieHeader).toContain('p_skey=PSKEY123')
-    expect(authCookieHeader).toContain('qrsig=abc123')
+    expect(authCookieHeader).not.toContain('qrsig=')
 
     // QQLogin 走 client.postMusicu：module/method/code（参考 Spica:491-495）
     const qqLoginCall = log.find((c) => {
@@ -178,11 +181,12 @@ describe('createAuth', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('回归：p_skey 只落在 check_sig 重定向链第 2 跳（首跳裸 302）——跟随链才能取到', async () => {
-    // 本用例 mock 刻意把 p_skey 放在链的第 2 跳：check_sig 首跳为裸 302（无 set-cookie），
-    // login_jump 跳 200 + set-cookie p_skey。若实现退化为「首跳即止」（fetch redirect:'manual'），
-    // p_skey 永远取不到 → "QQ 登录获取 p_skey 失败"。此为防回归锚。
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-chain-'))
+  it('回归：check_sig 不带 Cookie 头（qrsig 不外泄），p_skey 从首跳 302 种下', async () => {
+    // 防回归锚（根因实证，2026-09-06）：Spica qqmusic.py:406-412 与 L-1124 _authorize_qq_qr
+    // 的 check_sig 都不带 Cookie——qrsig 是 ssl.ptlogin2.qq.com 域会话，发给
+    // ssl.ptlogin2.graph.qq.com 会让服务端走另一套响应（不给 p_skey），真实扫码即
+    // 「获取 p_skey 失败」。若实现给 check_sig 加上 cookie 头（旧移植的 bug），本用例必挂。
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-nocookie-'))
     const log: { url: string; init?: RequestInit }[] = []
     const fetchMock = routerFetch({
       login: () =>
@@ -201,17 +205,19 @@ describe('createAuth', () => {
     if (!result.ok) throw new Error('expect ok')
     expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o9876' })
 
-    // 第 2 跳（login_jump）确实收到过请求（fetchChain 跟链证据）
-    const loginJumpCall = log.find((c) => {
-      try { return new URL(c.url).pathname === '/login_jump' } catch { return false }
+    // 根因锚：check_sig 请求不得带 cookie 头
+    const checkSigCall = log.find((c) => {
+      try { return new URL(c.url).pathname === '/check_sig' } catch { return false }
     })
-    expect(loginJumpCall).toBeTruthy()
-    // 第 2 跳种下的 p_skey 被合并进 cookieJar，并在 authorize 请求中携带
+    expect(checkSigCall).toBeTruthy()
+    expect((checkSigCall?.init?.headers as Record<string, string>)['cookie']).toBeUndefined()
+
+    // 首跳 302 Set-Cookie 种下的 p_skey 进 cookieJar → authorize 携带并用于 g_tk
+    // （独立参考实现 hash33，不 import auth 的）
     const authCall = log.find((c) => {
       try { return new URL(c.url).pathname === '/oauth2.0/authorize' } catch { return false }
     })
     expect(String((authCall?.init?.headers as Record<string, string>)['cookie'])).toContain('p_skey=PSKEY123')
-    // g_tk 基于第 2 跳种下的 p_skey 计算（独立参考实现 hash33，不 import auth 的）
     const authBody = String(authCall?.init?.body)
     expect(authBody).toContain('g_tk=' + h33('PSKEY123', 5381))
     // authorize 链最终 URL 带 code → QQLogin 正常换到凭证
@@ -220,6 +226,37 @@ describe('createAuth', () => {
     })
     const musicuBody = JSON.parse(String(qqLoginCall?.init?.body))
     expect(musicuBody.req.param.code).toBe('AUTHCODE123')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('check_sig 未种 p_skey（服务端异常响应）→ ok:false 含「p_skey」、状态 failed', async () => {
+    // 与用户真实报错同路径的失败分支：check_sig 首跳没有 Set-Cookie p_skey →
+    // 「QQ 登录获取 p_skey 失败」，且不得继续 authorize/QQLogin（零后续请求）。
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-nopkey-'))
+    const log: { url: string; init?: RequestInit }[] = []
+    const fetchMock = routerFetch({
+      login: () =>
+        "ptuiCB('0','登录成功！','https://ssl.ptlogin2.qq.com/check_sig?ptqrtoken=K&skey=XYZ&uin=9876&ptsigx=SIGAB')",
+      authorizeLocation:
+        'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F&code=AUTHCODE123&state=state',
+      qqLogin: { req: { code: 0, data: { musicid: 9876, musickey: 'KEY123' } } },
+      noPkey: true,
+      requestLog: log,
+    })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const auth = createAuth({ qqClient: client, fetchImpl: fetchMock, cookiePath: path.join(dir, 'cookie.json') })
+
+    await auth.startQr()
+    const result = await auth.waitForResult(5000)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('p_skey')
+    expect(auth.getStatus()).toMatchObject({ state: 'failed', error: expect.stringContaining('p_skey') })
+    // 失败即止：不换 code、不打 QQLogin
+    const authCall = log.find((c) => {
+      try { return new URL(c.url).pathname === '/oauth2.0/authorize' } catch { return false }
+    })
+    expect(authCall).toBeUndefined()
     fs.rmSync(dir, { recursive: true, force: true })
   })
 

@@ -20,6 +20,8 @@ export interface AppDeps {
   userDataDir: string
   fetchImpl?: typeof fetch
   emitEvent?: (channel: string, payload: unknown) => void  // 队列事件转发到渲染器
+  /** 诊断：非空时把 QQ 登录各网络步响应摘要追加到该文件（仅排障用，正常不设） */
+  debugLogFile?: string
 }
 
 /** 封面 mime 按魔数嗅探（T8 评审项：不硬编码 jpeg；PNG 89 50 4E 47 / JPEG FF D8 FF） */
@@ -33,7 +35,7 @@ export function createApp(deps: AppDeps) {
   const cookieFile = path.join(deps.userDataDir, 'qqmusic_cookie.json')
   const fetchImpl = deps.fetchImpl ?? fetch
   const client = createQqClient(fetchImpl, { uin: '0' })
-  const auth = createAuth({ qqClient: client, fetchImpl, cookiePath: cookieFile })
+  const auth = createAuth({ qqClient: client, fetchImpl, cookiePath: cookieFile, debugLogFile: deps.debugLogFile })
   const neClient = createNeClient(fetchImpl)
   const neAuth = createNeAuth({ cookiePath: path.join(deps.userDataDir, 'netease_cookie.json') })
   const savedNe = neAuth.getCookie()
