@@ -60,10 +60,10 @@ async function openDir(outputPath?: string): Promise<void> {
           <span class="song-name" :title="j.name">{{ j.name }}</span>
           <span class="artist" v-if="j.artist">- {{ j.artist }}</span>
           <span class="state" :class="j.state">{{ STATE_TEXT[j.state] ?? j.state }}</span>
-          <button v-if="j.state === 'done' && j.outputPath" class="open-btn" @click="openDir(j.outputPath)">打开目录</button>
         </div>
-        <div class="foot" v-if="j.error">
-          <span class="error">{{ j.error }}</span>
+        <div class="foot" v-if="j.error || (j.state === 'done' && j.outputPath)">
+          <span v-if="j.error" class="error">{{ j.error }}</span>
+          <button v-if="j.state === 'done' && j.outputPath" class="open-btn" @click="openDir(j.outputPath)">打开目录</button>
         </div>
       </div>
     </div>
@@ -93,6 +93,7 @@ async function openDir(outputPath?: string): Promise<void> {
 .foot { display: flex; gap: 10px; font-size: 12px; }
 .downgrade { color: #d9930e; }
 .error { color: #d32f2f; word-break: break-all; }
+.foot { display: flex; align-items: center; gap: 10px; font-size: 12px; min-height: 22px; }
 .open-btn { margin-left: auto; border: 1px solid #d0d0d0; border-radius: 5px; background: #fff; font-size: 12px; padding: 2px 10px; cursor: pointer; }
 .open-btn:hover { border-color: #31c27c; color: #31c27c; }
 .empty { color: #888; font-size: 13px; padding: 18px 0; }

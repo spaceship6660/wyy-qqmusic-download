@@ -1,6 +1,7 @@
 import { app, ipcMain, BrowserWindow, shell } from 'electron'
-import { join } from 'node:path'
-import { appendFileSync } from 'node:fs'
+import { join, isAbsolute, dirname } from 'node:path'
+import { appendFileSync, existsSync } from 'node:fs'
+
 import { createApp } from './app'
 import { buildCookieHeader, cookieHeaderHasMusicU } from './neteaseAuth'
 
@@ -25,6 +26,13 @@ try {
   // 诊断文件写失败（只读目录等）不影响使用
 }
 
+// 下载目录绝对化（2026-09-06 实机：默认 'downloads' 是相对路径，相对打包 exe 的
+// 工作目录落盘——用户找不到文件、「打开目录」无反应）。相对/空值 → 系统「下载」目录下。
+function ensureAbsoluteDir(v: string, fallbackName: string): string {
+  if (!v) return join(app.getPath('downloads'), fallbackName)
+  if (isAbsolute(v)) return v
+  return join(app.getPath('downloads'), v === 'downloads' || v === 'decrypted' ? fallbackName : v)
+}
 const appInstance = createApp({
   userDataDir: app.getPath('userData'),
   debugLogFile: diagLogFile,
@@ -52,6 +60,17 @@ const appInstance = createApp({
 // 2) 返回值统一 JSON 化——DataCloneError 发生在 Electron 内部序列化时，handler
 //    本身不抛、常规 catch 抓不到；stringify 失败（BigInt/循环引用/函数等）才是
 //    真凶，此时写盘记录并返回 undefined。诊断日志同 userData。
+// 启动迁移：相对下载目录 → 系统「下载」目录（绝对值），立即落盘（0.3.7：
+// 默认 'downloads' 相对 exe 工作目录落盘，用户找不到文件、打开目录无反应）
+{
+  const s0 = appInstance.settingsGet()
+  const dl = ensureAbsoluteDir(s0.downloadDir, '音乐下载')
+  const dec = ensureAbsoluteDir(s0.decryptOutDir ?? '', '音乐解密')
+  if (dl !== s0.downloadDir || dec !== s0.decryptOutDir) {
+    appInstance.settingsSet({ downloadDir: dl, decryptOutDir: dec })
+  }
+}
+
 const ipcErrorLog = join(app.getPath('userData'), 'ipc-errors.log')
 function safeHandle(channel: string, fn: (...args: any[]) => unknown): void {
   ipcMain.handle(channel, async (_e, ...args: any[]) => {
@@ -102,7 +121,12 @@ safeHandle('auth:poll', () => appInstance.authPoll())
 safeHandle('auth:waitResult', (ms: number) => appInstance.authWaitResult(ms))
 safeHandle('auth:importCookie', (c: string) => appInstance.authImportCookie(c))
 safeHandle('auth:status', () => appInstance.authStatus())
-safeHandle('fs:openDir', (p: string) => { if (p) shell.showItemInFolder(p) })
+safeHandle('fs:openDir', (p: string) => {
+  if (!p) return
+  // 文件存在 → 定位；不存在（相对路径历史/已移动）→ 打开其父目录兜底
+  if (existsSync(p)) shell.showItemInFolder(p)
+  else shell.openPath(dirname(p))
+})
 safeHandle('unlock:run', (paths: unknown) => appInstance.unlockRun(Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : []))
 safeHandle('ne:search', (q: string) => appInstance.neSearch(q))
 safeHandle('ne:account', () => appInstance.neAccount())
