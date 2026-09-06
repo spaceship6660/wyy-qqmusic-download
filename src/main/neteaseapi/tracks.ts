@@ -8,19 +8,26 @@ export interface PlaylistDTO {
   subscribed?: boolean    // 收藏的歌单
   creatorUid?: number     // 歌单创建者 uid（= 我 → 自建）
   trackCount: number
+  cover: string           // coverImgUrl（歌单卡片封面；此前未接线，网易云歌单页全是占位图）
 }
 export interface NeTrackDetail { date: string }
 export interface NePlaylistResult { tracks: TrackDTO[]; requiresLogin: boolean }
 
 export function neteaseTrackToDto(s: any): TrackDTO {
-  const ar: any[] = s?.ar ?? []
+  // 双形状兼容（2026-09-06 真实接口实测）：
+  // - cloudsearch/pc、v1/album：ar（数组）/ al（含 picUrl）/ dt（毫秒）
+  // - song/detail（歌单分页拉明细用）：artists（数组）/ album（含 picUrl）/ duration（毫秒）
+  // 此前只认前者 → 歌单/我喜欢的音乐全部「未知歌手」+ 无封面（歌名/vip 字段两边同名故正常）
+  const ar: any[] = s?.ar ?? s?.artists ?? []
+  const al = s?.al ?? s?.album ?? {}
+  const ms = typeof s?.dt === 'number' ? s.dt : typeof s?.duration === 'number' ? s.duration : undefined
   return {
     id: String(s.id),
     name: s?.name ?? '',
     artist: ar.map((x) => x?.name ?? '').filter(Boolean).join(' / ') || '未知歌手',
-    album: s?.al?.name ?? '',
-    cover: s?.al?.picUrl ?? '',
-    duration: typeof s?.dt === 'number' ? Math.round(s.dt / 1000) : undefined,
+    album: al?.name ?? '',
+    cover: al?.picUrl ?? '',
+    duration: typeof ms === 'number' ? Math.round(ms / 1000) : undefined,
     vip: (s?.fee ?? 0) > 0,
   }
 }
@@ -45,6 +52,7 @@ export async function neUserPlaylist(client: NeClient, uid: number): Promise<Pla
       subscribed: !!p.subscribed,
       creatorUid: p.creator?.userId ?? 0,
       trackCount: p.trackCount ?? 0,
+      cover: p.coverImgUrl ?? '',
     }))
   return list.sort((a, b) => Number(b.liked) - Number(a.liked))
 }
@@ -110,7 +118,7 @@ export async function neSearchAlbums(client: NeClient, q: string): Promise<NeAlb
     .map((a) => ({
       id: a.id,
       name: a.name ?? '',
-      artist: a.artist?.name ?? '',
+      artist: a.artist?.name ?? a.artists?.[0]?.name ?? '',
       cover: a.picUrl ?? '',
       songCount: a.size ?? undefined,
     }))
@@ -126,11 +134,15 @@ export interface NePlaylistPage {
   tracks: TrackDTO[]
   total: number
   more: boolean
+  /** 下一页 offset（按请求的 batch 推进；渲染侧翻页必须用它，不能用 tracks.length，
+   *  song/detail 可能丢歌——用返回条数推进会造成重叠复拉） */
+  nextOffset: number
 }
 
 /** 歌单全量分页（2026-09-06 定型）：v6/detail 的 trackIds 匿名即全量（如 200/125/1581），
- * 歌曲明细用 song/detail 批量拉（实测 50 ids 一次 200 OK；页大小 500 防超长 URL） */
-export async function nePlaylistPage(client: NeClient, id: string, offset: number, pageSize = 500): Promise<NePlaylistPage | null> {
+ * 歌曲明细用 song/detail 批量拉。页大小默认 200（此前 500：首屏 URL 巨大、响应慢、
+ * 一次渲染 500 卡片直接卡死，「我喜欢的音乐加载缓慢」根因之一）。 */
+export async function nePlaylistPage(client: NeClient, id: string, offset: number, pageSize = 200): Promise<NePlaylistPage | null> {
   const meta = await client.getJson<{ playlist?: { trackCount?: number; trackIds?: Array<{ id: number }> } }>(
     `https://music.163.com/api/v6/playlist/detail/?id=${id}`,
   )
@@ -138,10 +150,11 @@ export async function nePlaylistPage(client: NeClient, id: string, offset: numbe
   const total = meta?.playlist?.trackCount ?? ids.length
   if (ids.length === 0) return null
   const batch = ids.slice(offset, offset + pageSize)
-  if (batch.length === 0) return { tracks: [], total, more: false }
+  if (batch.length === 0) return { tracks: [], total, more: false, nextOffset: offset }
   const json = await client.getJson<{ songs?: any[] }>(
     `https://music.163.com/api/song/detail?ids=[${batch.join(',')}]`,
   )
   const tracks = (json?.songs ?? []).filter((t) => t?.id).map(neteaseTrackToDto)
-  return { tracks, total, more: offset + batch.length < ids.length }
+  const nextOffset = offset + batch.length
+  return { tracks, total, more: nextOffset < ids.length, nextOffset }
 }

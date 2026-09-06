@@ -47,6 +47,10 @@ const LYRIC_MODES: Array<{ v: 'both' | 'embed' | 'lrc' | 'none'; label: string }
   border: 1px solid #e3e6ea;
   border-radius: 8px;
   font-size: 13px;
+  /* 置顶：翻长列表时码率/歌词选项始终可见（滚动容器是 main.content，sticky 相对它生效） */
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 .label { color: #666; margin-right: 2px; }
 .opt { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: #444; }

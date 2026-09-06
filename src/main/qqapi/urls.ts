@@ -57,12 +57,15 @@ export function buildCandidates(
   return out
 }
 
-/** 取直链：一次批量请求全部候选，按响应行挑选有 purl 的最高档候选；实际质量以返回的文件名前缀为准。 */
+/** 取直链：一次批量请求全部候选，按响应行挑选有 purl 的最高档候选；实际质量以返回的文件名前缀为准。
+ * debug：可选诊断回调。全档失败时记录现场（sip 有无/行数/每行 filename+有无 purl，不记 purl/vkey 值），
+ * 用于区分“服务端无下载版权（行在但全空）”与“请求/匹配姿势不对（行缺/文件名对不上）”。 */
 export async function getAudioUrl(
   client: QqClient,
   songmid: string,
   mediaMid: string | undefined,
   preferred: Quality,
+  debug?: (line: string) => void,
 ): Promise<AudioUrlResult> {
   const startIdx = QUALITY_LADDER.indexOf(preferred)
   const candidates = buildCandidates(songmid, mediaMid, preferred)
@@ -85,7 +88,9 @@ export async function getAudioUrl(
   }, { path: ['req_1', 'data'] })) as { sip?: string[]; midurlinfo?: VkeyRow[] }
 
   const sip = data?.sip?.[0] ?? ''
-  for (const row of data?.midurlinfo ?? []) {
+  const rows = data?.midurlinfo ?? []
+  debug?.(`vkey ${songmid} 起点 ${preferred}：sip=${sip ? '有' : '无'} rows=${rows.length} 有purl=${rows.filter((r) => r?.purl).length}`)
+  for (const row of rows) {
     if (!row?.purl) continue
     const requested = byFilename.get(row.filename ?? '')
     const legacyOk = !requested && !row.filename && (!row.songmid || row.songmid === songmid)
@@ -100,5 +105,9 @@ export async function getAudioUrl(
     }
   }
 
+  debug?.(
+    `vkey ${songmid} 全档空：candidates=[${candidates.map((c) => c.filename).join(',')}] ` +
+    `rows=[${rows.map((r) => `${r?.filename ?? '(无文件名)'}=${r?.purl ? '有' : '空'}`).join(',')}]`,
+  )
   throw new QqApiError('未拿到可播放 URL（可能需要登录，或账号权益不足，无损需绿钻权益）', 'no-playable-url')
 }

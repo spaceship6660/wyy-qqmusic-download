@@ -56,6 +56,17 @@ export function createApp(deps: AppDeps) {
 
   const emitEvent = deps.emitEvent ?? (() => {})
 
+  // 诊断日志 appender（vkey 全档失败现场 / 收藏接口字段史；仅 keys 与有无标记，不记密钥与直链）
+  const dbgFile = deps.debugLogFile
+    ? (line: string) => {
+      try {
+        fs.appendFileSync(deps.debugLogFile as string, `[${new Date().toISOString()}] ${line}\n`, 'utf-8')
+      } catch {
+        // 诊断失败不影响业务
+      }
+    }
+    : undefined
+
   // 共享下载骨架（QQ/网易云 runner 共同）：直链→占位→下载(失败重取一次)→标签→清理。
   // 两源差异仅三个参数化点：直链解析 resolveOnce、扩展名 extFor、元数据 fetchDetail/fetchLyrics；
   // ID 校验等前置守卫由各 wrapper 负责（如网易云的非数值 id 拒下载）。
@@ -138,7 +149,7 @@ export function createApp(deps: AppDeps) {
       // 按 source 选 wrapper：一个参数化点集合 = 一条管线（QQ / 网易云）
       if (job.source === 'netease') return runNeteaseJob(job, report)
       return runDownloadJob(job, report, {
-        resolveOnce: (q) => getAudioUrl(client, job.track.id, job.track.mediaMid, q),
+        resolveOnce: (q) => getAudioUrl(client, job.track.id, job.track.mediaMid, q, dbgFile),
         extFor: (q) => QUALITY_MAP[q].ext,
         fetchDetail: () => getTrackDetail(client, job.track.id),
         fetchLyrics: () => fetchLyric(client, job.track.id),
@@ -158,7 +169,7 @@ export function createApp(deps: AppDeps) {
     const id = Number(job.track.id)
     if (!Number.isFinite(id)) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
     return runDownloadJob(job, report, {
-      resolveOnce: (q) => neGetAudioUrl(neClient, id, q),
+      resolveOnce: (q) => neGetAudioUrl(neClient, id, q, dbgFile),
       extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
       fetchDetail: () => neGetTrackDetail(neClient, id),
       fetchLyrics: () => neFetchLyric(neClient, id),
@@ -243,7 +254,9 @@ export function createApp(deps: AppDeps) {
     },
     qqFavPlaylists: () => {
       const euin = auth.getEncHostUin()
-      return euin ? getFavPlaylists(client, euin) : []
+      if (!euin) return []
+      // 诊断：收藏接口字段史（v_list 条目键名，仅 keys 无隐私）记入诊断日志，封面映射对不上时定位用
+      return getFavPlaylists(client, euin, dbgFile)
     },
     qqDissTracks: (params: { disstid?: number; dirid?: number; songBegin?: number }) =>
       getDissTracksPage(client, {
@@ -300,14 +313,27 @@ export function createApp(deps: AppDeps) {
       return res
     },
     authImportCookie: (cookie: string) => auth.importCookie(cookie),
+    authClear: () => {
+      auth.clear()
+      return true
+    },
     authStatus: () => {
       const s = auth.getStatus()
-      return { loggedIn: s.state === 'loggedIn', uin: s.uin }
+      // hasEncUin：收藏歌单（CgiGetPlaylistFavInfo）必需；手动导入的 Cookie 没有它，
+      // 渲染侧据此给出精确提示；loginMethod 区分扫码/导入；diagLog 供用户上报排障日志
+      return {
+        loggedIn: s.state === 'loggedIn',
+        uin: s.uin,
+        hasEncUin: !!auth.getEncHostUin(),
+        loginMethod: auth.getLoginMethod(),
+        diagLog: deps.debugLogFile ?? '',
+      }
     },
     neSearch: (q: string) => neSearch(neClient, q),
     neAlbumSearch: (q: string) => neSearchAlbums(neClient, q),
     neAlbumSongs: (id: number) => neAlbumSongs(neClient, id),
-    nePlaylistPage: (params: { id: string; offset: number }) => nePlaylistPage(neClient, params.id, params.offset ?? 0),
+    nePlaylistPage: (params: { id: string; offset: number; limit?: number }) =>
+      nePlaylistPage(neClient, params.id, params.offset ?? 0, params.limit ?? 200),
     neAccount: () => neAccount(neClient),
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),

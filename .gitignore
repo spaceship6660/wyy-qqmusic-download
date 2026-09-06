@@ -7,3 +7,6 @@ dist/
 .idea/dist-v0*/
 dist-*/
 win-unpacked/
+# 本地下载/解密产物（默认已迁移到系统下载目录，防相对路径误落仓）
+downloads/
+decrypted/

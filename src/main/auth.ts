@@ -16,6 +16,8 @@ export interface AuthCookie {
   cookie: string
   /** 登录响应 EncryptUin（QQ 音乐「我喜欢的音乐/收藏歌单」接口的加密 UIN；扫码登录才有） */
   encHostUin?: string
+  /** 凭证来源（扫码/手动导入）：收藏歌单为空时用于精确提示 */
+  loginMethod?: 'qr' | 'import'
 }
 
 export interface AuthOptions {
@@ -36,6 +38,8 @@ export interface Auth {
   importCookie(cookieHeader: string): boolean
   getStatus(): AuthStatus
   getEncHostUin(): string
+  /** 凭证来源（收藏歌单为空时精确提示用；无文件/旧文件返回 ''） */
+  getLoginMethod(): '' | 'qr' | 'import'
   clear(): void
 }
 
@@ -439,14 +443,19 @@ export function createAuth(options: AuthOptions): Auth {
       const musicid = String(credential.musicid ?? '')
       const musickey = String(credential.musickey ?? '')
       if (!musicid || !musickey) return die('QQ 登录成功但未取到播放凭证')
-      // EncryptUin：QQ 歌单接口（CgiGetDiss dirid=201 / CgiGetPlaylistFavInfo）必需的加密 UIN
-      const encHostUin = String(credential.encHostUin ?? credential.EncryptUin ?? '')
+      // EncryptUin：QQ 歌单接口（CgiGetDiss dirid=201 / CgiGetPlaylistFavInfo）必需的加密 UIN。
+      // 字段名做大小写兜底（不同时期/文档记法：encHostUin / EncryptUin / encryptUin / enc_host_uin），
+      // 诊断日志打印 data keys（非敏感）以便未来对不上时直接定位。
+      const encHostUin = String(
+        credential.encHostUin ?? credential.EncryptUin ?? credential.encryptUin ?? credential.enc_host_uin ?? '',
+      )
+      dbg(`QQLogin data keys: ${Object.keys(credential).join(',')}`)
       dbg(`QQLogin: musicid/musickey 已取得（uin=${musicid}） encHostUin=${encHostUin ? '有' : '无'}`)
 
       // 7) 拼 cookie + 落盘 + setAuth（参考自 Spica qqmusic.py:508-511）
       const cookie =
         `uin=o${musicid}; qqmusic_uin=o${musicid}; qm_keyst=${musickey}; qqmusic_key=${musickey}`
-      const authCookie: AuthCookie = { uin: `o${musicid}`, cookie, ...(encHostUin ? { encHostUin } : {}) }
+      const authCookie: AuthCookie = { uin: `o${musicid}`, cookie, loginMethod: 'qr', ...(encHostUin ? { encHostUin } : {}) }
       persist(authCookie)
       qqClient.setAuth(authCookie)
       qrsig = '' // 终态：qrsig 作废，防再次轮询
@@ -476,7 +485,7 @@ export function createAuth(options: AuthOptions): Auth {
       /(^|;\s*)(qqmusic_uin|uin)=o?\d+/gi,
       (_m, sep: string, name: string) => `${sep}${name.toLowerCase()}=${uin}`,
     )
-    const authCookie: AuthCookie = { uin, cookie }
+    const authCookie: AuthCookie = { uin, cookie, loginMethod: 'import' }
     persist(authCookie)
     qqClient.setAuth(authCookie)
     // 导入成功即进入 loggedIn 终态：清掉扫码会话变量（含 qrsig），防止陈旧 qrsig 翻转状态机
@@ -487,6 +496,10 @@ export function createAuth(options: AuthOptions): Auth {
 
   function getEncHostUin(): string {
     return readCookieFile()?.encHostUin ?? ''
+  }
+
+  function getLoginMethod(): '' | 'qr' | 'import' {
+    return readCookieFile()?.loginMethod ?? ''
   }
 
   function getStatus(): AuthStatus {
@@ -524,7 +537,9 @@ export function createAuth(options: AuthOptions): Auth {
     fs.writeFileSync(cookiePath, JSON.stringify(c), 'utf-8')
   }
 
-  /** 参考 Spica load_login（qqmusic.py:235-248）：损坏/缺字段按匿名，不抛 */
+  /** 参考 Spica load_login（qqmusic.py:235-248）：损坏/缺字段按匿名，不抛。
+   * 2026-09-06 修复：此前只读回 {uin, cookie}，把 encHostUin 丢了——
+   * getEncHostUin() 恒返回空串，收藏歌单（CgiGetPlaylistFavInfo 必需 euin）扫码多少次都出不来。 */
   function readCookieFile(): AuthCookie | null {
     try {
       if (!fs.existsSync(cookiePath)) return null
@@ -532,7 +547,12 @@ export function createAuth(options: AuthOptions): Auth {
       const uin = typeof data.uin === 'string' ? data.uin.trim() : ''
       const cookie = typeof data.cookie === 'string' ? data.cookie.trim() : ''
       if (!uin || !cookie) return null
-      return { uin, cookie }
+      const encHostUin = typeof data.encHostUin === 'string' ? data.encHostUin.trim() : ''
+      const loginMethod = data.loginMethod === 'qr' || data.loginMethod === 'import' ? data.loginMethod : undefined
+      // 兼容旧文件（无 loginMethod）：有 encHostUin 必为扫码所得
+      const method: AuthCookie['loginMethod'] = loginMethod ?? (encHostUin ? 'qr' : undefined)
+      if (method) return { uin, cookie, ...(encHostUin ? { encHostUin } : {}), loginMethod: method }
+      return encHostUin ? { uin, cookie, encHostUin } : { uin, cookie }
     } catch {
       return null
     }
@@ -545,5 +565,5 @@ export function createAuth(options: AuthOptions): Auth {
     return { ok: false, reason }
   }
 
-  return { startQr, poll, waitForResult, importCookie, getStatus, getEncHostUin, clear }
+  return { startQr, poll, waitForResult, importCookie, getStatus, getEncHostUin, getLoginMethod, clear }
 }

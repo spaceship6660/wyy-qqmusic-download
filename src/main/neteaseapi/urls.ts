@@ -13,6 +13,7 @@ export async function neGetAudioUrl(
   client: NeClient,
   id: number,
   preferred: Quality,
+  debug?: (line: string) => void,
 ): Promise<NeAudioUrlResult> {
   // ape/m4a 无对应 br 档 → 从 320 起，且命中即视为降级
   const supported = NE_QUALITY_BR[preferred] !== undefined
@@ -24,6 +25,8 @@ export async function neGetAudioUrl(
       `https://music.163.com/api/song/enhance/player/url?ids=[${id}]&br=${br}`,
     )
     const url = json?.data?.[0]?.url
+    // 诊断：只记命中与否 + 业务码，不记直链（失败现场定位：版权空 vs 风控 vs 权益）
+    debug?.(`ne vkey ${id} ${q}(br=${br})：${url ? '命中' : `空(code=${json?.code ?? '?'})`}`)
     if (url) return { url, quality: q, downgraded: !supported || i > startIdx }
   }
   throw new QqApiError(

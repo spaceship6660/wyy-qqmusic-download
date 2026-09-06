@@ -61,7 +61,8 @@ async function openDir(outputPath?: string): Promise<void> {
           <span class="artist" v-if="j.artist">- {{ j.artist }}</span>
           <span class="state" :class="j.state">{{ STATE_TEXT[j.state] ?? j.state }}</span>
         </div>
-        <div class="foot" v-if="j.error || (j.state === 'done' && j.outputPath)">
+        <div class="foot" v-if="j.error || j.downgraded || (j.state === 'done' && j.outputPath)">
+          <span v-if="j.downgraded" class="downgrade">已降级为低品质</span>
           <span v-if="j.error" class="error">{{ j.error }}</span>
           <button v-if="j.state === 'done' && j.outputPath" class="open-btn" @click="openDir(j.outputPath)">打开目录</button>
         </div>

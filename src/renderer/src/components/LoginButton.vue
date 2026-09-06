@@ -3,7 +3,7 @@ import { ref, onUnmounted } from 'vue'
 import { api } from '../api'
 
 defineProps<{ loggedIn: boolean; uin: string }>()
-const emit = defineEmits<{ changed: [{ loggedIn: boolean; uin: string }] }>()
+const emit = defineEmits<{ changed: [{ loggedIn: boolean; uin: string; hasEncUin?: boolean; loginMethod?: string }] }>()
 
 type QrPhase = 'idle' | 'loading' | 'waiting' | 'scanned' | 'finalizing'
 const qrOpen = ref(false)
@@ -45,7 +45,7 @@ function scheduleAutoClose(): void {
 
 async function refreshStatus(): Promise<void> {
   const s = await api.invoke('auth:status')
-  emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '' })
+  emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '', hasEncUin: !!s?.hasEncUin, loginMethod: s?.loginMethod ?? '' })
 }
 
 async function onPoll(): Promise<void> {
@@ -166,12 +166,21 @@ async function importCookie(): Promise<void> {
 }
 
 onUnmounted(stopPolling)
+
+/** 退出登录：清本机凭证（auth:clear），通知 App 刷新歌单导航 */
+async function logout(): Promise<void> {
+  await api.invoke('auth:clear')
+  emit('changed', { loggedIn: false, uin: '', hasEncUin: false, loginMethod: '' })
+}
 </script>
 
 <template>
   <div class="login-btn-wrap">
     <button v-if="!loggedIn" class="login-btn" @click="startLogin">登录 QQ</button>
-    <span v-else class="logged" :title="uin">已登录{{ uin ? `（${uin}）` : '' }}</span>
+    <div v-else class="login-row">
+      <span class="logged" :title="uin">已登录{{ uin ? `（${uin}）` : '' }}</span>
+      <button class="logout-btn" @click="logout">退出</button>
+    </div>
 
     <div v-if="qrOpen" class="modal-mask" @click.self="closeQr">
       <div class="modal">
@@ -196,12 +205,12 @@ onUnmounted(stopPolling)
       </div>
     </div>
 
-    <button class="manual-btn" @click="openManualImport">手动导入 Cookie</button>
+    <button class="manual-btn" v-if="!loggedIn" @click="openManualImport">手动导入 Cookie</button>
   </div>
 </template>
 
 <style scoped>
-.login-btn-wrap { display: flex; align-items: center; gap: 10px; }
+.login-btn-wrap { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
 .login-btn {
   padding: 6px 18px;
   font-size: 13px;
@@ -210,9 +219,30 @@ onUnmounted(stopPolling)
   border: none;
   border-radius: 6px;
   cursor: pointer;
+  width: 100%;
 }
 .login-btn:hover { background: #27ab6b; }
-.logged { font-size: 13px; color: #31c27c; }
+.login-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.logged {
+  font-size: 13px;
+  color: #31c27c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.logout-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #999;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.logout-btn:hover { color: #d32f2f; background: #fdecea; }
 .manual-btn {
   padding: 6px 12px;
   font-size: 12px;
@@ -221,6 +251,7 @@ onUnmounted(stopPolling)
   border: 1px solid #d0d0d0;
   border-radius: 6px;
   cursor: pointer;
+  width: 100%;
 }
 .manual-btn:hover { border-color: #31c27c; color: #31c27c; }
 .modal-mask {

@@ -317,6 +317,54 @@ describe('createAuth', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('encHostUin 写读 round-trip：落盘含 EncryptUin 时 getEncHostUin 可读（收藏歌单必需）', async () => {
+    // 2026-09-06 回归：readCookieFile 曾丢弃 encHostUin，致 getEncHostUin 恒空、收藏歌单永空
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-euin-'))
+    const cookiePath = path.join(dir, 'cookie.json')
+    const fetchMock = routerFetch({ login: () => "ptuiCB('66','x','')" })
+    fs.writeFileSync(
+      cookiePath,
+      JSON.stringify({ uin: 'o123', cookie: 'uin=o123; qqmusic_key=k', encHostUin: 'EUX123' }),
+      'utf-8',
+    )
+    // 新实例模拟重启：必须从文件读回 encHostUin
+    const auth = createAuth({ qqClient: createQqClient(fetchMock, { uin: '0' }), fetchImpl: fetchMock, cookiePath })
+    expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o123' })
+    expect(auth.getEncHostUin()).toBe('EUX123')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('encHostUin 缺失：手动导入/旧文件无该字段时 getEncHostUin 为空串', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-noeuin-'))
+    const cookiePath = path.join(dir, 'cookie.json')
+    const fetchMock = routerFetch({ login: () => "ptuiCB('66','x','')" })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const auth = createAuth({ qqClient: client, fetchImpl: fetchMock, cookiePath })
+    expect(auth.importCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    expect(auth.getEncHostUin()).toBe('')
+    expect(auth.getLoginMethod()).toBe('import')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('loginMethod 持久化：qr/import 写入重启后可读，旧文件缺字段回空串', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-method-'))
+    const cookiePath = path.join(dir, 'cookie.json')
+    const fetchMock = routerFetch({ login: () => "ptuiCB('66','x','')" })
+    const mk = () => createAuth({ qqClient: createQqClient(fetchMock, { uin: '0' }), fetchImpl: fetchMock, cookiePath })
+    // 旧文件（无 loginMethod、无 euin）：兼容读，method 回空串
+    fs.writeFileSync(cookiePath, JSON.stringify({ uin: 'o1', cookie: 'uin=o1; qqmusic_key=k' }), 'utf-8')
+    expect(mk().getLoginMethod()).toBe('')
+    // 新文件（qr + euin）：原样读回
+    fs.writeFileSync(
+      cookiePath,
+      JSON.stringify({ uin: 'o1', cookie: 'uin=o1; qqmusic_key=k', encHostUin: 'EUX', loginMethod: 'qr' }),
+      'utf-8',
+    )
+    expect(mk().getLoginMethod()).toBe('qr')
+    expect(mk().getEncHostUin()).toBe('EUX')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('o 前缀归一化：裸 QQ 号导入后 uin/qqmusic_uin 同步加 o', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-norm-'))
     const cookiePath = path.join(dir, 'cookie.json')

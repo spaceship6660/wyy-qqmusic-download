@@ -1,20 +1,47 @@
 # 音乐下载器（QQ 音乐 + 网易云）
 
-一个对标 [Creamplayer](https://github.com/Beadd/Creamplayer) 的桌面音乐下载器（Electron + TypeScript 单语言实现）：搜索 / 歌单 / 登录后无损下载，自动内嵌封面与歌词，标签规格面向 **foobar2000** 与 **Musicolet**。
+一个对标 [Creamplayer](https://github.com/Beadd/Creamplayer) 的桌面音乐下载器（Electron + TypeScript 单语言实现）：搜索 / 歌单 / 登录后无损下载，自动内嵌封面与中日对照歌词，标签规格面向 **foobar2000** 与 **Musicolet**。
 
 > 本项目从调研到实现全流程记录在 `docs/`（specs / plans / 验收 / 调研），详见文末「文档索引」。
 
 ## 功能
 
-| 能力 | 说明 |
-|---|---|
-| **双平台音源** | QQ 音乐 + 网易云：搜索（歌曲 / 专辑 tab）+ 链接导入 + **登录后左侧导航直取歌单**（我喜欢的音乐 / 自建歌单 / 收藏的歌单，翻页懒加载） |
-| **登录** | QQ：ptlogin2 扫码 + 手动 Cookie 导入；网易云：开窗扫码抓 Cookie + 手动导入。凭证明文落盘于用户数据目录（本地使用）。QQ 扫码登录同时保存 EncryptUin（收藏歌单接口必需） |
-| **质量档位** | 无损(flac/ape 按账号权益) / 320k / 128k / m4a(QQ)；**拿不到自动降级**并在队列黄条提示 |
-| **标签内嵌** | 封面必内嵌（MP3=APIC / FLAC=PICTURE）；歌词四档：内嵌+另存 .lrc / 仅内嵌 / 仅另存 / 不保存 |
-| **播放器兼容** | MP3 写 ID3v2.3 USLT+SYLT 双帧（node-id3）；FLAC/OGG 写 Vorbis `LYRICS`+`UNSYNCEDLYRICS` 双键——foobar2000 装 ESLyric 等任意歌词组件即可显示，Musicolet 原生读取 |
-| **下载管线** | 并发队列（可调 1-4）、全局 1 请求/秒限速防风控、`.part` 原子写、同名任务占位防碰撞、直链过期自动重取 |
-| **解密** | 导入 QQ 音乐加密文件（.mflac/.mflac0/.mgg/.mgg0/.mgg1/.qmc0）→ 还原原容器（flac/ogg/mp3）；文件名「歌手 - 歌名」搜索匹配后自动补封面/歌词/标签；musicex 等无密钥格式明确报错 |
+### 找歌：搜索
+
+- **双平台音源**：QQ 音乐 + 网易云，歌曲 / 专辑双 tab，关键词搜索 + 单曲/歌单/专辑链接导入。
+- **结果内联展示**：搜完直接铺在搜索页下方，歌曲/专辑 tab 常驻；切 tab 有关键词时自动按当前 tab 重搜，不用再按一次搜索。
+- **专辑**：点卡片进专辑歌曲页，返回回到专辑列表（QQ 专辑封面为完整直链；网易云专辑内联展开）。
+
+### 拿歌单：登录后左侧导航
+
+- **QQ 音乐**：我喜欢的音乐（dirid=201）/ 自建歌单 / 收藏的歌单。扫码登录（ptlogin2）同时保存 EncryptUin（收藏歌单接口必需）；手动导入的 Cookie 没有它，收藏页会明确提示退出重扫。
+- **网易云**：我喜欢的音乐（specialType=5 置顶）/ 自建 / 收藏，歌单卡片带封面。
+- **退出登录**：左下两行登录态各带退出按钮，退出清对应缓存并收起导航。
+
+### 下歌：质量与队列
+
+- **质量档位**：无损（flac）/ APE / 320k / 128k / m4a（QQ）；拿不到自动降级，「我的下载」里黄条提示（进行中与已完成都显示）。
+- **本批选项**：码率 + 歌词模式选择条在所有歌曲列表页顶部**吸顶显示**，翻多长都看得见；只影响当前批次，默认值在设置页改。
+- **下载不跳页**：点「下载选中」后留在当前列表继续勾选，进度看底部工具栏「下载中 N」。
+- **下载管线**：并发队列（可调 1-4）、下载侧 1 请求/秒限速、`.part` 原子写、同名占位防碰撞、直链过期自动重取一次。
+- **失败可查**：全档拿不到直链时队列显示服务端原文因；vkey 失败现场（每档有无，不记密钥）写入本地诊断日志。
+
+### 歌词与标签
+
+- **中文译文自动合并**：网易云 `tlyric` + QQ（`trans:1` 参数）译文按**时间戳**配对，插到原文行下中日对照；作词/作曲头行不动，QQ 的 `//` 占位行与注音标签自动丢弃。源头没有译文的歌保持原文（QQ 译文覆盖本就少于网易云）。
+- **歌词四档**：内嵌+另存 .lrc / 仅内嵌 / 仅另存 / 不保存。
+- **播放器兼容**：封面必内嵌（MP3=APIC / FLAC=PICTURE）；MP3 写 ID3v2.3 USLT+SYLT 双帧，FLAC/OGG 写 Vorbis `LYRICS`+`UNSYNCEDLYRICS` 双键——foobar2000 装 ESLyric 等任意歌词组件即可显示，Musicolet 原生读取。
+
+### 浏览体验：缓存
+
+- **秒开**：我喜欢 / 歌单 / 专辑歌曲页 session 级内存缓存，切走再回零等待；翻页进度写穿进缓存。
+- **后台追新（SWR）**：命中缓存先渲染旧数据，后台只拉首屏做 diff，有变化才原地替换（勾选交集保留），标题旁小字提示「正在检查更新… / 已是最新 / 已更新」；60 秒新鲜度窗口内零请求，无感且防风控。
+- **手动刷新**：标题旁 `↻ 刷新` 按钮随时强制重拉；失败（风控/断网）静默保留旧缓存。
+- **加载态**：切页瞬间同步占位 + 居中转圈遮罩 + 回到顶部；快速连点时慢响应自动丢弃，不会旧页面盖住新页面。
+
+### 解密
+
+- 导入 QQ 音乐加密文件（.mflac/.mflac0/.mgg/.mgg0/.mgg1/.qmc0）→ 还原原容器（flac/ogg/mp3）；文件名「歌手 - 歌名」搜索匹配后自动补封面/歌词/标签；musicex 等无密钥格式明确报错。
 
 ## 快速开始
 
@@ -25,42 +52,35 @@ npm run dev
 
 # 打包 Windows 安装包（electron-builder，产出 dist/）
 npm run dist
+
+# 类型检查与测试
+npm run typecheck
+npx vitest run
 ```
 
 **使用流程**
-1. **QQ 音乐 / 网易云**：搜索框输入歌名/歌手（可切「专辑」tab 搜专辑）+ 粘贴单曲/歌单/专辑链接；结果勾选后点**窗口底部固定下载栏**「下载选中」→ 自动跳「我的下载」看进度。
-2. **歌单**（登录后左侧导航出现次级项）：我喜欢的音乐 / 自建歌单 / 收藏的歌单 → 歌单列表 → 点开 → 歌曲列表；超长歌单**滚动到页底点「加载更多」懒加载**（不会一次拉 1500+ 首）。
-3. **网易云**：扫码登录后左侧出现歌单；专辑搜索同样支持。
-4. **解密 Tab**：选文件或整个文件夹（自动过滤加密扩展名）→「解密并补全」→ 结果列表 ✓ 已补全 / ○ 仅解密 / ✗ 失败原因；输出目录在设置页可改。
-5. **设置**：默认码率、并发数、下载目录、解密输出目录、歌词模式；下载时的码率/歌词模式选择只影响当前批次。
 
-## 验证状态（2026-09-06）
+1. **QQ 音乐 / 网易云**：搜索框输入歌名/歌手（歌曲/专辑 tab 随时切，自动重搜）+ 粘贴单曲/歌单/专辑链接；结果勾选后点**窗口底部固定下载栏**「下载选中」，留在本页继续挑。
+2. **歌单**（登录后左侧导航出现次级项）：我喜欢的音乐 / 自建歌单 / 收藏的歌单 → 歌单列表 → 点开 → 歌曲列表；超长歌单滚动到底自动续拉（1500+ 首也不会一次全拉）；标题旁 `↻` 可强制刷新。
+3. **解密 Tab**：选文件或整个文件夹（自动过滤加密扩展名）→「解密并补全」→ 结果列表 ✓ 已补全 / ○ 仅解密 / ✗ 失败原因；输出目录在设置页可改。
+4. **设置**：默认码率、并发数、下载目录、解密输出目录、歌词模式。
 
-- **自动化**：130 个单测/集成用例全绿（`npx vitest run`），类型检查与构建通过。
-- **QQ 歌单接口实测（2026-09-06，用户账号实机）**：自建歌单 36 个、我喜欢的音乐（dirid=201，50 首分页验证）直连可用；收藏歌单需 EncryptUin（扫码登录即保存）。
-- **解密算法**：以 `showhwa/UnlockMusicProject_Archive`（Go）为参考逐字节移植，14 个用例用官方测试向量验证（derive 密钥派生、mflac0_rc4/mflac_rc4/mflac_map/mgg_map/qmc0_static 端到端明文比对、QTag/错误路径）。
-- **真实网络冒烟**：网易云匿名全链路一次通过（搜索 → 320k 直链 → 下载 → 歌词 USLT + 封面 JPEG 内嵌读回一致）；QQ 歌词接口真实可用（47 行 LRC）。
-- **待你环境验证**（详见 `docs/acceptance-*.md`）：
-  - QQ 扫码登录（check_sig 不带 Cookie 已修复；登录尝试自动写诊断日志 `userData/qq-login-diag.log`，失败时 UI 显示路径）
-  - 网易云扫码登录 + 歌单全量
-  - 无损（会员权益）下载
-  - 解密：用你手头的 mflac/mgg 文件实测 + foobar2000/Musicolet 显示
-  
-## 已知限制（如实说明）
+## 风控与已知限制（如实说明）
 
-- **QQ 匿名下载已被服务端收紧**：2026-09-02 实测匿名 `CgiGetVkey` 返回空 purl，免费歌也要登录态。
-- **网易云匿名下载现状（2026-09-06 实测）**：普通/原创歌匿名 320k/128k 可下（全链路冒烟通过）；**个别版权歌（如周杰伦类）匿名 url=404 需登录**，登录后可下载更多；无损（br=0）需登录+账号权益。
-- QQ 搜索的 `DoSearchForQQMusicDesktop` 在部分环境返回空列表（经典 `client_search_cp` 端点正常）——如遇空结果请用单曲/歌单链接入口或登录态重试；解密补全同理（匿名时搜不到会只解密不补标签）。
+- **能播≠能下**：播放（流媒体）与下载是两套权益。部分同人/OST/数字单曲 App 里能播，但服务端全档不给下载直链——此时失败是正确的，队列会显示原因。
+- **限速范围**：1 请求/秒限速目前只覆盖**下载管线**；浏览请求（搜索/歌单/翻页）不限速，靠 60 秒缓存新鲜度窗口压请求量。短时间内连点三四个不同歌单仍可能撞网易云频控（空响应，冷却 20~60 秒），等半分钟按 `↻` 重试即可；QQ 宽松得多。
+- **QQ 匿名下载已被服务端收紧**：匿名 `CgiGetVkey` 返回空 purl，免费歌也要登录态。
+- **网易云匿名**：普通歌 320k/128k 可下；个别版权歌匿名 404 需登录；无损需登录+账号权益，无权益自动降级。
+- **QQ 译文覆盖**：少于网易云；源头没有译文的歌只写原文。已下载的旧文件不会自动补译文，删了重下即可（同名自动加后缀不覆盖）。
 - node-id3 写 MP3 为 ID3v2.3 + UTF-16（foobar2000/Musicolet 均原生支持；个别古董设备可能不识别）。
-- 网易云无损（br=0）与 VIP 歌需要登录+对应权益；无权益时自动降级 320k。
 - 解密：musicex（"cex\0" 结尾）与 STag 无内嵌密钥（密钥在 Mac/Android 的 MMKV），Windows 侧明确报错；OGG 等容器暂不补标签（只解密）。
 
 ## 技术栈与结构
 
 - Electron 36 / electron-vite / Vue 3 + Pinia / TypeScript / Vitest / node-id3 / music-metadata（测试读回验证）
-- 主进程（纯 Node）模块：`qqapi/`（QQ 接口）、`neteaseapi/`（网易云接口，参照 Creamplayer 端点）、`auth`/`neteaseAuth`（登录）、`downloader/`（队列/限速/文件）、`tagger/`（MP3/FLAC 标签）、`unlock/`（mflac/mgg 解密：TEA/密钥派生/密码器/文件解码器）、`app.ts`（依赖树 + IPC）
-- 渲染器：`stores/` + `components/`（搜索/网格/队列/登录/设置/网易云/解密 Tab）
-- 测试：`tests/`（client/数据层/直链/登录/队列/标签/app 集成/renderer store/unlock 向量，全部 mock 或本地 server；真实网络仅手工验收）
+- 主进程（纯 Node）模块：`qqapi/`（QQ 接口）、`neteaseapi/`（网易云接口，参照 Creamplayer 端点）、`auth`/`neteaseAuth`（登录）、`downloader/`（队列/限速/文件）、`tagger/`（MP3/FLAC 标签）、`lyricMerge.ts`（中外文歌词时间戳配对合并）、`unlock/`（mflac/mgg 解密：TEA/密钥派生/密码器/文件解码器）、`app.ts`（依赖树 + IPC）
+- 渲染器：`stores/`（含列表来源标记防串台下载）+ `components/`（搜索/网格/队列/登录/设置/网易云/解密 Tab）
+- 测试：`tests/`（150 用例全绿：client/数据层/直链/登录/队列/标签/歌词合并/app 集成/renderer store/unlock 向量，全部 mock 或本地 server；真实网络仅手工验收）
 
 ## 文档索引（`docs/`）
 
@@ -72,9 +92,26 @@ npm run dist
 - `acceptance-m1-m5.md` / `acceptance-netease.md` — 验收记录（含手工清单与已知边界）
 - `unlock-port-progress-2026-09-06.md` — 解密算法分析与移植进度（Go 参考 + 测试向量说明）
 
-## 隐私
+## 致谢（参考仓库）
+
+本项目单语言重写，但协议与算法细节站在这些仓库肩膀上，按用途致谢：
+
+| 参考 | 用途 |
+|---|---|
+| [Beadd/Creamplayer](https://github.com/Beadd/Creamplayer) | 对标产品；网易云明文老接口（cloudsearch / player/url / lyric）同款 |
+| [showhwa/UnlockMusicProject_Archive](https://github.com/showhwa/UnlockMusicProject_Archive) | QQ 加密文件解密算法（TEA / 密钥派生 / mflac-mgg-qmc 密码器）逐字节移植 |
+| [luren-dc/QQMusicApi](https://github.com/luren-dc/QQMusicApi) | QQ 登录态歌单接口（`modules/user.py`：自建 / 收藏 / 我喜欢） |
+| [L-1124/QQMusicApi](https://github.com/L-1124/QQMusicApi) | QQ 扫码登录与歌词接口参考 |
+| [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi) | vkey 接口调研对照 |
+| [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/qqmusic.py) | 文件名前缀反查质量档（F000/M800…） |
+| [lyswhut/lx-music-desktop](https://github.com/lyswhut/lx-music-desktop) | node-id3 标签内嵌管线参考 |
+| [Binaryify/NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) | 网易云 weapi/eapi 与扫码登录调研对照 |
+| [imsyy/SPlayer](https://github.com/imsyy/SPlayer) | QQ 歌词 `trans:1` + 完整参数取译文（避开 QRC 加密） |
+| [Unlock Music 生态](https://git.unlock-music.dev/um/web) | 本地解密方案参考 |
+
+## 隐私与合规
 
 - 登录凭证（QQ/网易云 cookie）明文存于用户数据目录（`userData/qqmusic_cookie.json`、`netease_cookie.json`），仅本机使用，不入库、不打印、不上传。
-- QQ 登录尝试会写本地诊断日志（`userData/qq-login-diag.log`，含 QQ 号与会话 token 摘要），仅排障用；审计后可直接删除。
-- 所有请求直连国内服务（绕过系统代理），Referer/UA 模拟浏览器以规避基本风控；全局限速 1 请求/秒。
-- 本工具仅供个人下载**已获授权的歌曲**（如已购买会员可下载的曲目、免费歌曲）；请遵守平台服务条款与版权法规。
+- QQ 登录尝试与 vkey 失败现场写本地诊断日志（`userData/qq-login-diag.log`，只记 QQ 号、接口字段名与每档有无，不记密钥与直链），仅排障用；审计后可直接删除。
+- 所有请求直连国内服务（绕过系统代理），Referer/UA 模拟浏览器；下载管线限速 1 请求/秒。
+- **使用边界**：本工具仅供个人下载**已获授权的歌曲**（如已购买会员可下载的曲目、免费歌曲）与解密本人缓存文件备份；禁止绕过付费、传播与商业使用。完整声明见 [`DISCLAIMER.md`](./DISCLAIMER.md)，使用即视为同意。

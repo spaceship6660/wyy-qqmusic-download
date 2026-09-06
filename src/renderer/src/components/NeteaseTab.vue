@@ -3,11 +3,12 @@ import { ref, onMounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
+import type { UiTrack } from '../stores/download'
 import { api } from '../api'
 
 // 网易云功能页：登录（扫码/手动导入）+ 搜索（歌曲 | 专辑）。
 // 歌单浏览（我喜欢的/自建/收藏）已由左侧导航承担（App.vue 统一管理）；
-// 搜索结果统一进 store.tracks，下载走窗口底部工具栏。
+// 搜索/专辑结果内联展示在本页（歌曲/专辑 tab 常驻，不再跳走），下载走窗口底部工具栏。
 const store = useDownloadStore()
 const loggedIn = ref(false)
 const nickname = ref('')
@@ -16,10 +17,25 @@ const error = ref('')
 const cookieText = ref('')
 const showImport = ref(false)
 const searchTab = ref<'song' | 'album'>('song')
+const busy = ref('')
 
 interface NeAlbum { id: number; name: string; artist: string; cover: string; songCount?: number }
 const albums = ref<NeAlbum[]>([])
 const albumSearched = ref(false)
+/** 搜索结果缓存（tab 来回切换零请求；搜索按钮/回车强制刷新） */
+const neSongCache = new Map<string, UiTrack[]>()
+const neAlbumCache = new Map<string, NeAlbum[]>()
+function cachePut<K, V>(m: Map<K, V>, k: K, v: V, max = 30): void {
+  m.delete(k)
+  m.set(k, v)
+  while (m.size > max) {
+    const oldest = m.keys().next()
+    if (oldest.done) break
+    m.delete(oldest.value)
+  }
+}
+/** 点开的专辑（内联展示其歌曲，代替跳走；返回专辑列表则清空） */
+const openedAlbum = ref('')
 
 async function refreshAuth(): Promise<void> {
   const s: any = await api.invoke('ne:auth:status')
@@ -30,40 +46,91 @@ async function refreshAuth(): Promise<void> {
   }
 }
 
-async function doSearch(): Promise<void> {
+async function doSearch(force = true): Promise<void> {
   error.value = ''
   const kw = q.value.trim()
-  if (!kw) return
-  if (searchTab.value === 'album') {
-    albums.value = (await api.invoke<NeAlbum[]>('ne:albumSearch', kw)) ?? []
-    albumSearched.value = true
-    return
+  if (!kw || busy.value) return
+  if (!force && searchTab.value === 'song') {
+    const hit = neSongCache.get(kw)
+    if (hit) {
+      albums.value = []
+      albumSearched.value = false
+      openedAlbum.value = ''
+      store.setTracks([...hit], 'netease')
+      return
+    }
   }
-  albums.value = []
-  albumSearched.value = false
-  const tracks: any = await api.invoke('ne:search', kw)
-  if (!Array.isArray(tracks)) {
-    error.value = '搜索失败，请稍后重试'
-    return
+  if (!force && searchTab.value === 'album') {
+    const hit = neAlbumCache.get(kw)
+    if (hit) {
+      albums.value = hit
+      albumSearched.value = true
+      openedAlbum.value = ''
+      return
+    }
   }
-  store.setTracks(tracks)
-  // 通知 App：当前列表 = 网易云搜索结果（底栏下载用网易云 source 与标题展示）
-  window.dispatchEvent(new CustomEvent('ne:list-updated', { detail: `「${kw}」搜索` }))
+  busy.value = '搜索中…'
+  try {
+    if (searchTab.value === 'album') {
+      const found = (await api.invoke<NeAlbum[]>('ne:albumSearch', kw)) ?? []
+      albums.value = found
+      albumSearched.value = true
+      openedAlbum.value = ''
+      cachePut(neAlbumCache, kw, found)
+      return
+    }
+    albums.value = []
+    albumSearched.value = false
+    openedAlbum.value = ''
+    const tracks: any = await api.invoke('ne:search', kw)
+    if (!Array.isArray(tracks)) {
+      error.value = '搜索失败，请稍后重试'
+      return
+    }
+    // 内联展示（不再 dispatch 跳 songsView，保证歌曲/专辑 tab 始终可见可切）
+    cachePut(neSongCache, kw, [...tracks])
+    store.setTracks(tracks, 'netease')
+  } finally {
+    busy.value = ''
+  }
 }
 
 async function openAlbum(id: number, title: string): Promise<void> {
   error.value = ''
-  const tracks: any = (await api.invoke('ne:albumSongs', id)) ?? []
-  if (!Array.isArray(tracks) || tracks.length === 0) {
-    error.value = '专辑为空或加载失败'
-    return
+  if (busy.value) return
+  busy.value = '专辑加载中…'
+  try {
+    const tracks: any = (await api.invoke('ne:albumSongs', id)) ?? []
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      error.value = '专辑为空或加载失败'
+      return
+    }
+    // 内联展示专辑歌曲（不再跳走；返回按钮回到专辑列表）
+    store.setTracks(tracks, 'netease')
+    openedAlbum.value = title
+  } finally {
+    busy.value = ''
   }
-  store.setTracks(tracks)
-  window.dispatchEvent(new CustomEvent('ne:list-updated', { detail: `专辑 · ${title}` }))
+}
+
+/** 歌曲 | 专辑 tab 切换：有关键词时自动按当前 tab 搜索（缓存命中零请求） */
+function switchSearchTab(t: 'song' | 'album'): void {
+  searchTab.value = t
+  if (t === 'song') openedAlbum.value = ''
+  if (!q.value.trim() || busy.value) return
+  void doSearch(false)
 }
 
 async function openLogin(): Promise<void> {
   await api.invoke('ne:auth:open')
+}
+
+/** 退出登录：清本机网易云凭证，通知 App 收起歌单导航 */
+async function logout(): Promise<void> {
+  await api.invoke('ne:auth:clear')
+  loggedIn.value = false
+  nickname.value = ''
+  window.dispatchEvent(new CustomEvent('ne:authChanged'))
 }
 
 async function doImportCookie(): Promise<void> {
@@ -89,6 +156,7 @@ onMounted(() => {
     <header class="top">
       <h2>网易云</h2>
       <span v-if="loggedIn" class="who">已登录：{{ nickname }}</span>
+      <button v-if="loggedIn" class="ghost" @click="logout">退出登录</button>
       <template v-else>
         <button class="ghost" @click="openLogin">扫码登录</button>
         <button class="ghost" @click="showImport = !showImport">手动导入 Cookie</button>
@@ -100,15 +168,15 @@ onMounted(() => {
     </div>
     <p v-if="error" class="err">{{ error }}</p>
     <div class="tools">
-      <input v-model="q" placeholder="歌名 / 歌手 / 专辑" @keyup.enter="doSearch" />
-      <button class="ghost" @click="doSearch">搜索</button>
+      <input v-model="q" placeholder="歌名 / 歌手 / 专辑" @keyup.enter="doSearch(true)" />
+      <button class="ghost" :disabled="!!busy" @click="doSearch(true)">{{ busy || '搜索' }}</button>
     </div>
     <div class="search-tabs">
-      <button :class="{ active: searchTab === 'song' }" @click="searchTab = 'song'">歌曲</button>
-      <button :class="{ active: searchTab === 'album' }" @click="searchTab = 'album'">专辑</button>
+      <button :class="{ active: searchTab === 'song' }" @click="switchSearchTab('song')">歌曲</button>
+      <button :class="{ active: searchTab === 'album' }" @click="switchSearchTab('album')">专辑</button>
     </div>
     <DownloadOptions v-if="searchTab === 'song'" />
-    <template v-if="searchTab === 'album'">
+    <template v-if="searchTab === 'album' && !openedAlbum">
       <div class="plist-grid">
         <div v-for="a in albums" :key="a.id" class="plist-card" @click="openAlbum(a.id, a.name)">
           <div class="plist-cover" :style="a.cover ? { backgroundImage: `url(${a.cover})` } : {}">{{ a.songCount ?? '?' }} 首</div>
@@ -117,9 +185,31 @@ onMounted(() => {
         </div>
       </div>
       <div v-if="albumSearched && !albums.length" class="empty">未找到专辑</div>
+      <div v-else-if="!albumSearched" class="empty">切换到「专辑」，输入关键词搜索专辑</div>
     </template>
+    <div v-else-if="searchTab === 'album'" class="grid">
+      <div class="songs-head">
+        <button class="ghost" @click="openedAlbum = ''">‹ 返回专辑列表</button>
+        <span class="songs-title">专辑 · {{ openedAlbum }}（{{ store.tracks.length }} 首）</span>
+      </div>
+      <TrackGrid
+        :tracks="store.tracks"
+        :selected-ids="store.selectedIds"
+        @toggle="store.toggle($event)"
+        @select-all="store.selectAll()"
+        @clear="store.clear()"
+      />
+    </div>
     <div v-else class="grid">
-      <TrackGrid :tracks="store.tracks" :selected-ids="store.selectedIds" @toggle="store.toggle($event)" />
+      <TrackGrid
+        v-if="store.trackSource !== 'qq'"
+        :tracks="store.tracks"
+        :selected-ids="store.selectedIds"
+        @toggle="store.toggle($event)"
+        @select-all="store.selectAll()"
+        @clear="store.clear()"
+      />
+      <div v-else class="empty">当前列表是 QQ 音乐搜索结果，请到「QQ 音乐」页查看 / 下载</div>
     </div>
   </div>
 </template>
@@ -168,4 +258,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .plist-name { font-size: 13px; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plist-sub { font-size: 12px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { color: #888; font-size: 13px; padding: 20px 0; }
+.songs-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.songs-title { font-size: 15px; font-weight: 700; }
 </style>

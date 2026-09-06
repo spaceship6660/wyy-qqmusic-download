@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl, searchAlbums } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -19,6 +19,7 @@ function routedFetch(): typeof fetch {
     }
     if (url.includes('fcg_ucc_getcdinfo_byids_cp')) return new Response(fx('playlist.json'))
     if (url.includes('fcg_v8_album_info_cp')) return new Response(fx('album.json'))
+    if (url.includes('client_search_cp')) return new Response(fx('album-search.json'))
     return new Response('{}', { status: 404 })
   }) as unknown as typeof fetch
 }
@@ -80,6 +81,19 @@ describe('stripJsonp', () => {
 })
 
 describe('歌单/专辑', () => {
+  it('专辑搜索 client_search_cp 真实结构解析（albumPic 完整 URL 直用）', async () => {
+    const client = createQqClient(routedFetch(), { uin: '0' })
+    const albums = await searchAlbums(client, '稻香')
+    expect(albums.length).toBe(2)
+    expect(albums[0].mid).toBe('002Neh8l0uciQZ')
+    expect(albums[0].name).toBe('魔杰座')
+    expect(albums[0].singer).toBe('周杰伦')
+    expect(albums[0].cover).toBe('http://y.gtimg.cn/music/photo_new/T002R180x180M000002Neh8l0uciQZ_3.jpg')
+    expect(albums[0].songCount).toBe(11)
+    // singer_list 为空回退 singerName；albumPic 为空则封面空串（不拼垃圾 URL）
+    expect(albums[1].singer).toBe('测试歌手')
+    expect(albums[1].cover).toBe('')
+  })
   it('歌单去 JSONP 包裹并取 songlist', async () => {
     const client = createQqClient(routedFetch(), { uin: '0' })
     const entries = await fetchPlaylist(client, '1374105607')

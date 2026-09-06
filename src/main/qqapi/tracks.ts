@@ -1,4 +1,5 @@
 import type { QqClient, MusicuReq } from './client'
+import { mergeLyricTranslation } from '../lyricMerge'
 
 export type Quality = 'flac' | 'ape' | '320' | '128' | 'm4a'
 
@@ -73,7 +74,12 @@ export async function searchAlbums(client: QqClient, query: string, opts: { limi
     mid: a.albumMID,
     name: a.albumName ?? '',
     singer: (a.singer_list ?? []).map((x: any) => x?.name ?? '').filter(Boolean).join(' / ') || (a.singerName ?? ''),
-    cover: qqCoverUrl({ album: { pmid: a.albumPic ?? '' } }),
+    // 2026-09-06 真实接口实测：albumPic 本身就是完整封面 URL
+    // （http://y.gtimg.cn/music/photo_new/T002R180x180M000....jpg），不是 pmid——
+    // 此前按 pmid 拼 URL 得到双重前缀的垃圾地址，专辑卡片封面全裂
+    cover: typeof a.albumPic === 'string' && /^https?:\/\//.test(a.albumPic)
+      ? a.albumPic
+      : qqCoverUrl({ album: { pmid: a.albumPic ?? '' } }),
     songCount: a.song_count ?? 0,
   }))
 }
@@ -179,18 +185,29 @@ export async function fetchAlbum(client: QqClient, mid: string): Promise<TrackDT
   return list.map((e) => trackFromEntry(e, data?.name ?? ''))
 }
 
-/** 歌词：PlayLyricInfo 返回 base64 的 LRC；失败/缺失一律返回空串（不阻塞下载） */
+/** 歌词：PlayLyricInfo 返回 base64 的 LRC。param 必须带 trans:1 才会返回译文
+ * （2026-09-06 实测：只传 songMID 时 trans 恒空；加 trans:1 即得明文 base64 LRC，
+ *  不加 crypt 则不走 QRC 加密，无需 DES 解密）；译文与原文按时间戳合并。失败/缺失一律返回空串（不阻塞下载） */
 export async function fetchLyric(client: QqClient, mid: string): Promise<string> {
   try {
     const data = (await client.postMusicu({
       req_2: {
         module: 'music.musichallSong.PlayLyricInfo',
         method: 'GetPlayLyricInfo',
-        param: { songMID: mid },
+        param: { songMID: mid, trans: 1 },
       },
-    }, { path: ['req_2', 'data'] })) as { lyric?: string }
+    }, { path: ['req_2', 'data'] })) as { lyric?: string; trans?: string }
     if (!data?.lyric) return ''
-    return Buffer.from(data.lyric, 'base64').toString('utf-8')
+    const orig = Buffer.from(data.lyric, 'base64').toString('utf-8')
+    let trans = ''
+    if (data?.trans) {
+      try {
+        trans = Buffer.from(data.trans, 'base64').toString('utf-8')
+      } catch {
+        trans = ''
+      }
+    }
+    return mergeLyricTranslation(orig, trans)
   } catch {
     return ''
   }

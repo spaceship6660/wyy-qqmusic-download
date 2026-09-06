@@ -15,6 +15,8 @@ export interface UiQueueJob {
 export const useDownloadStore = defineStore('download', {
   state: () => ({
     tracks: [] as UiTrack[],
+    /** 当前 tracks 的来源（QQ/网易云内联列表互斥显示，防止拿错源下载） */
+    trackSource: '' as '' | 'qq' | 'netease',
     selectedIds: new Set<string>(),
     /** 网易云页选中（与 QQ 页分离；底部固定工具栏共用） */
     neSelectedIds: new Set<string>(),
@@ -26,7 +28,11 @@ export const useDownloadStore = defineStore('download', {
     neLoggedIn: false,
   }),
   actions: {
-    setTracks(t: UiTrack[]) { this.tracks = t; this.selectedIds = new Set() },
+    setTracks(t: UiTrack[], source?: 'qq' | 'netease') {
+      this.tracks = t
+      this.selectedIds = new Set()
+      if (source) this.trackSource = source
+    },
     /** 懒加载：追加下一批歌曲（保留现有选中） */
     appendTracks(t: UiTrack[]) { this.tracks = [...this.tracks, ...t] },
     toggle(id: string) {

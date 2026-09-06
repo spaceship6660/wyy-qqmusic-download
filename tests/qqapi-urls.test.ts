@@ -75,4 +75,16 @@ describe('getAudioUrl', () => {
     expect(err.code).toBe('no-playable-url')
     expect(String(err.message)).toMatch(/登录|权益/)
   })
+
+  it('全档失败时诊断回调记录现场（行数/每档有无，不含 purl 值）', async () => {
+    const empty = '{"req_1":{"code":0,"data":{"sip":["https://dl.stream.qqmusic.qq.com/"],"midurlinfo":[{"songmid":"M001","filename":"F000MED001.flac","purl":""},{"songmid":"M001","filename":"M500MED001.mp3","purl":""}]}}}'
+    const fetchMock = vi.fn(async () => new Response(empty)) as unknown as typeof fetch
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const lines: string[] = []
+    await getAudioUrl(client, 'M001', 'MED001', 'flac', (l) => lines.push(l)).catch(() => {})
+    const all = lines.join('\n')
+    expect(all).toContain('rows=2 有purl=0')
+    expect(all).toContain('F000MED001.flac=空')
+    expect(all).toContain('M500MED001.mp3=空')
+  })
 })

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createNeClient } from '../src/main/neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccount } from '../src/main/neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccount, nePlaylistPage } from '../src/main/neteaseapi/tracks'
 
 const fx = (n: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'netease', n), 'utf-8')
 
@@ -36,6 +36,50 @@ describe('neteaseTrackToDto', () => {
     expect(dto.vip).toBe(true)
     expect(dto.name).toContain('天空之城')
   })
+  it('兼容 song/detail 形状（artists/album/duration）：歌单分页不再未知歌手/无封面', () => {
+    // 2026-09-06 真实接口实锤：/api/song/detail 返回 artists + album，无 ar/al
+    const dto = neteaseTrackToDto({
+      id: 186016, name: '晴天', fee: 0, duration: 269000,
+      artists: [{ id: 6452, name: '周杰伦' }],
+      album: { id: 18905, name: '叶惠美', picUrl: 'https://p2.music.126.net/cover.jpg' },
+    })
+    expect(dto.id).toBe('186016')
+    expect(dto.artist).toBe('周杰伦')
+    expect(dto.album).toBe('叶惠美')
+    expect(dto.cover).toBe('https://p2.music.126.net/cover.jpg')
+    expect(dto.duration).toBe(269)
+    expect(dto.vip).toBe(false)
+  })
+})
+
+describe('nePlaylistPage', () => {
+  it('trackIds + song/detail 分批：artists/album 形状正确映射且 nextOffset 推进', async () => {
+    const fetchImpl = (async (input: any) => {
+      const url = String(input)
+      if (url.includes('/api/v6/playlist/detail')) {
+        return new Response(JSON.stringify({
+          playlist: { trackCount: 3, trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+        }), { status: 200 })
+      }
+      if (url.includes('/api/song/detail')) {
+        return new Response(JSON.stringify({
+          songs: [
+            { id: 1, name: 'A', fee: 0, artists: [{ name: 'SA' }], album: { name: 'AA', picUrl: 'http://c/1.jpg' } },
+            { id: 2, name: 'B', fee: 1, artists: [{ name: 'SB' }], album: { name: 'AB', picUrl: 'http://c/2.jpg' } },
+          ],
+        }), { status: 200 })
+      }
+      return new Response('{}', { status: 404 })
+    }) as unknown as typeof fetch
+    const client = createNeClient(fetchImpl)
+    const r = await nePlaylistPage(client, '999', 0, 2)
+    expect(r?.tracks.length).toBe(2)
+    expect(r?.tracks[0].artist).toBe('SA')
+    expect(r?.tracks[0].cover).toBe('http://c/1.jpg')
+    expect(r?.tracks[1].vip).toBe(true)
+    expect(r?.more).toBe(true)
+    expect(r?.nextOffset).toBe(2) // 按请求 batch 推进（非返回条数）
+  })
 })
 
 describe('neSearch', () => {
@@ -54,6 +98,8 @@ describe('neUserPlaylist', () => {
     expect(pls.length).toBeGreaterThan(0)
     expect(pls[0].liked).toBe(true)
     expect(pls[0].name).toBe('我喜欢的音乐')
+    // 歌单卡片封面：coverImgUrl 接线（此前缺失致歌单页全占位图）
+    expect(pls[0].cover).toBe('http://p1.music.126.net/liked.jpg')
   })
 })
 
