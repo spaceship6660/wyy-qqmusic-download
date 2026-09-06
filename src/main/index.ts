@@ -4,6 +4,16 @@ import { appendFileSync } from 'node:fs'
 import { createApp } from './app'
 import { buildCookieHeader, cookieHeaderHasMusicU } from './neteaseAuth'
 
+// 登录通道对齐参考实现（Spica qqmusic.py _direct_opener 注释：「QQ 登录端点全部是
+// 国内服务，不能跟随系统代理」，且 urllib/httpx 均为 HTTP/1.1）：
+// 1) no-proxy-server —— Chromium 网络栈默认跟随系统代理，代理出口 IP 会让
+//    ptlogin2 风控走另一套响应（不给 p_skey）；登录/下载全直连。
+// 2) disable-http2 —— ptlogin 系接口在 HTTP/2 会话上的行为差异是
+//    「Python 参考实现成功、Electron 失败」的剩余断层（2026-09-06 实证）。
+// 必须在 app ready 前设置。
+app.commandLine.appendSwitch('no-proxy-server')
+app.commandLine.appendSwitch('disable-http2')
+
 // QQ 登录诊断日志：默认写入 userData/qq-login-diag.log（每次扫码尝试追加，
 // 失败时 UI 显示该路径；内容含 QQ 号与会话 token 摘要，仅本机排障用，不入库）。
 // QQ_DIAG_LOG 可覆盖路径（测试/临时目录）。
