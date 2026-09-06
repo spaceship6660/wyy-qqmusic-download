@@ -29,10 +29,17 @@ const appInstance = createApp({
   userDataDir: app.getPath('userData'),
   debugLogFile: diagLogFile,
   emitEvent: (channel, payload) => {
+    // webContents.send 同样做结构化克隆：先 JSON 净化，杜绝 DataCloneError
+    let safe: unknown
+    try {
+      safe = JSON.parse(JSON.stringify(payload))
+    } catch {
+      return
+    }
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue
       try {
-        win.webContents.send(channel, payload)
+        win.webContents.send(channel, safe)
       } catch {
         // 窗口未就绪/已销毁时忽略
       }
@@ -42,7 +49,15 @@ const appInstance = createApp({
 
 ipcMain.handle('qq:search', (_e, q: string) => appInstance.search(q))
 ipcMain.handle('qq:linkTracks', (_e, url: string) => appInstance.fetchTracksByLink(url))
-ipcMain.handle('dl:enqueue', (_e, payload: unknown) => appInstance.enqueue(payload as any))
+ipcMain.handle('dl:enqueue', async (_e, payload: unknown) => {
+  try {
+    return { ok: true, result: appInstance.enqueue(payload as any) }
+  } catch (e) {
+    // 入队异常不 reject（reject 在渲染侧表现为原生弹窗「An object could not be cloned.」
+    // 类歧义错误）；返回错误对象由渲染层展示
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+})
 ipcMain.handle('settings:get', () => appInstance.settingsGet())
 ipcMain.handle('settings:set', (_e, patch: unknown) => appInstance.settingsSet(patch as any))
 ipcMain.handle('auth:startQr', () => appInstance.authStartQr())

@@ -174,12 +174,14 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
   background: #31c27c;
 }
 .sidebar-foot { margin-top: auto; }
+/* 底栏贯穿全宽后为 sidebar 底部（登录区）留出空间 */
+.sidebar { padding-bottom: 72px; }
 .content { flex: 1; padding: 20px 24px 76px; min-width: 0; }
 
 /* 窗口底部固定工具栏（fixed 于视口底部，翻列表始终可见） */
 .toolbar {
   position: fixed;
-  left: 190px; /* 对齐 sidebar 右侧 */
+  left: 0; /* 贯穿全宽：覆盖 sidebar 底部，避免视觉断档（2026-09-06 用户反馈错位） */
   right: 0;
   bottom: 0;
   height: 56px;
