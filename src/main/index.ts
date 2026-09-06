@@ -47,33 +47,70 @@ const appInstance = createApp({
   },
 })
 
-ipcMain.handle('qq:search', (_e, q: string) => appInstance.search(q))
-ipcMain.handle('qq:linkTracks', (_e, url: string) => appInstance.fetchTracksByLink(url))
-ipcMain.handle('dl:enqueue', async (_e, payload: unknown) => {
-  try {
-    return { ok: true, result: appInstance.enqueue(payload as any) }
-  } catch (e) {
-    // 入队异常不 reject（reject 在渲染侧表现为原生弹窗「An object could not be cloned.」
-    // 类歧义错误）；返回错误对象由渲染层展示
-    return { ok: false, error: e instanceof Error ? e.message : String(e) }
-  }
-})
-ipcMain.handle('settings:get', () => appInstance.settingsGet())
-ipcMain.handle('settings:set', (_e, patch: unknown) => appInstance.settingsSet(patch as any))
-ipcMain.handle('auth:startQr', () => appInstance.authStartQr())
-ipcMain.handle('auth:poll', () => appInstance.authPoll())
-ipcMain.handle('auth:waitResult', (_e, ms: number) => appInstance.authWaitResult(ms))
-ipcMain.handle('auth:importCookie', (_e, c: string) => appInstance.authImportCookie(c))
-ipcMain.handle('auth:status', () => appInstance.authStatus())
-ipcMain.handle('fs:openDir', (_e, p: string) => { if (p) try { shell.showItemInFolder(p) } catch { /* 路径不存在等错误忽略 */ } })
-ipcMain.handle('unlock:run', async (_e, paths: unknown) => appInstance.unlockRun(Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : []))
-ipcMain.handle('ne:search', (_e, q: string) => appInstance.neSearch(q))
-ipcMain.handle('ne:account', () => appInstance.neAccount())
-ipcMain.handle('ne:playlists', (_e, uid: number) => appInstance.nePlaylists(uid))
-ipcMain.handle('ne:playlist', (_e, id: string) => appInstance.nePlaylist(id))
-ipcMain.handle('ne:auth:importCookie', (_e, c: string) => appInstance.neAuthImport(c))
-ipcMain.handle('ne:auth:status', () => appInstance.neAuthStatus())
-ipcMain.handle('ne:auth:clear', () => appInstance.neAuthClear())
+// IPC 全 handler 包装（2026-09-06 实机「An object could not be cloned.」排查）：
+// 1) handler 异常 → 写盘（含 stack）后原样 reject（渲染层保持原有行为）；
+// 2) 返回值统一 JSON 化——DataCloneError 发生在 Electron 内部序列化时，handler
+//    本身不抛、常规 catch 抓不到；stringify 失败（BigInt/循环引用/函数等）才是
+//    真凶，此时写盘记录并返回 undefined。诊断日志同 userData。
+const ipcErrorLog = join(app.getPath('userData'), 'ipc-errors.log')
+function safeHandle(channel: string, fn: (...args: any[]) => unknown): void {
+  ipcMain.handle(channel, async (_e, ...args: any[]) => {
+    try {
+      const r = await fn(...args)
+      try {
+        return JSON.parse(JSON.stringify(r))
+      } catch (serr) {
+        try {
+          appendFileSync(
+            ipcErrorLog,
+            `[${new Date().toISOString()}] ${channel} 返回值不可序列化: ${serr instanceof Error ? serr.message : String(serr)}
+` +
+              `类型: ${r === null ? 'null' : typeof r} | ${Object.prototype.toString.call(r)}
+`,
+            'utf-8',
+          )
+        } catch {
+          // 写失败忽略
+        }
+        return undefined
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      try {
+        appendFileSync(
+          ipcErrorLog,
+          `[${new Date().toISOString()}] ${channel} 失败: ${msg}
+${err instanceof Error ? (err.stack ?? '') : ''}
+`,
+          'utf-8',
+        )
+      } catch {
+        // 写失败忽略
+      }
+      throw err
+    }
+  })
+}
+
+safeHandle('qq:search', (q: string) => appInstance.search(q))
+safeHandle('qq:linkTracks', (url: string) => appInstance.fetchTracksByLink(url))
+safeHandle('dl:enqueue', (payload: unknown) => appInstance.enqueue(payload as any))
+safeHandle('settings:get', () => appInstance.settingsGet())
+safeHandle('settings:set', (patch: unknown) => appInstance.settingsSet(patch as any))
+safeHandle('auth:startQr', () => appInstance.authStartQr())
+safeHandle('auth:poll', () => appInstance.authPoll())
+safeHandle('auth:waitResult', (ms: number) => appInstance.authWaitResult(ms))
+safeHandle('auth:importCookie', (c: string) => appInstance.authImportCookie(c))
+safeHandle('auth:status', () => appInstance.authStatus())
+safeHandle('fs:openDir', (p: string) => { if (p) shell.showItemInFolder(p) })
+safeHandle('unlock:run', (paths: unknown) => appInstance.unlockRun(Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : []))
+safeHandle('ne:search', (q: string) => appInstance.neSearch(q))
+safeHandle('ne:account', () => appInstance.neAccount())
+safeHandle('ne:playlists', (uid: number) => appInstance.nePlaylists(uid))
+safeHandle('ne:playlist', (id: string) => appInstance.nePlaylist(id))
+safeHandle('ne:auth:importCookie', (c: string) => appInstance.neAuthImport(c))
+safeHandle('ne:auth:status', () => appInstance.neAuthStatus())
+safeHandle('ne:auth:clear', () => appInstance.neAuthClear())
 ipcMain.handle('ne:auth:open', async () => {
   // 开窗扫码（Creamplayer 模式）：加载 music.163.com/login，窗口关闭即抓 cookie；
   // 窗口生命周期防御：重复打开先关旧窗（按登录页 URL 识别），避免窗口堆积
