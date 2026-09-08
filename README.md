@@ -43,6 +43,10 @@
 
 - 导入 QQ 音乐加密文件（.mflac/.mflac0/.mgg/.mgg0/.mgg1/.qmc0）→ 还原原容器（flac/ogg/mp3）；文件名「歌手 - 歌名」搜索匹配后自动补封面/歌词/标签；musicex 等无密钥格式明确报错。
 
+### UI
+<img width="1920" height="1017" alt="image" src="https://github.com/user-attachments/assets/444bfd95-21b6-4aa6-9662-69173ec39199" />
+
+
 ## 快速开始
 
 ```bash
