@@ -264,7 +264,7 @@ export function createApp(deps: AppDeps) {
         dirid: params.dirid,
         euin: auth.getEncHostUin() || undefined,
         songBegin: params.songBegin ?? 0,
-      }),
+      }, dbgFile),
     parseLink: async (url: string) => {
       const kind = parseLink(url)
       if (!kind) return null

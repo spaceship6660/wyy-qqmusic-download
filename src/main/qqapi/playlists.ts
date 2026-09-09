@@ -95,13 +95,19 @@ export interface QqDissPage {
   tracks: TrackDTO[]
   total: number
   more: boolean
+  /** 下一页 begin（按原始返回条数推进；过滤掉无 mid 条目后渲染条数可能更少，游标必须按原始推进否则重叠复拉） */
+  nextBegin: number
+  /** total 来源字段名（诊断用；fallback=服务端没给可用总数） */
+  totalSource: string
 }
 
 /** 我喜欢的音乐（dirid=201）或歌单歌曲（disstid）分页（CgiGetDiss → data.songlist）。
- * 懒加载：song_begin 递增（2026-09-06 用户要求：1500+ 首歌单不一次性加载） */
+ * 懒加载：song_begin 递增（2026-09-06 用户要求：1500+ 首歌单不一次性加载）。
+ * debug：可选诊断回调，记录 begin/返回条数/total/more（超长歌单翻页停住时定位用，仅数字无隐私）。 */
 export async function getDissTracksPage(
   client: QqClient,
   opts: { disstid?: number; dirid?: number; euin?: string; songBegin: number; songNum?: number },
+  debug?: (line: string) => void,
 ): Promise<QqDissPage | null> {
   const data = (await client.postMusicu(
     {
@@ -125,12 +131,37 @@ export async function getDissTracksPage(
   const list = data?.songlist ?? []
   if (!Array.isArray(list)) return null
   const tracks = list.filter((s: any) => s?.mid).map(dissSongToTrack)
-  // more 判定（2026-09-06 修复「只加载前 200 首」）：
-  // 此前完全依赖 data.total——该字段缺失/改名时 total 回退为 begin+len，more 恒为 false，
-  // 首屏之后永远不再分页。现加兜底：无有效 total 时以「是否拿满一页」判断。
+  // more 判定（2026-09-06 起三修）：
+  // 1. data.total 在超长歌单下实测缺失/不可信（用户 1500+ 首喜欢只显示 199/199 停住）——
+  //    候选字段全试一遍，拿不到就回退；
+  // 2. 判定与游标一律按原始返回条数（rawLen），不按过滤后条数——无 mid 条目被滤掉时，
+  //    按过滤数推进会重叠复拉、按过滤数判 more 会提前到底；
+  // 3. 无有效 total 时：拿满一页（rawLen >= songNum）即视为还有，反之到底。
   const songNum = opts.songNum ?? 200
-  const totalRaw = Number(data?.total)
-  const hasTotal = Number.isFinite(totalRaw) && totalRaw >= 0
-  const total = hasTotal ? totalRaw : opts.songBegin + tracks.length + (tracks.length >= songNum ? 1 : 0)
-  return { tracks, total, more: opts.songBegin + tracks.length < total }
+  const totalCandidates: Array<[string, unknown]> = [
+    ['total', data?.total],
+    ['total_song_num', data?.total_song_num],
+    ['songnum', data?.songnum],
+    ['songNum', data?.songNum],
+  ]
+  let total = NaN
+  let totalSource = 'fallback'
+  for (const [name, v] of totalCandidates) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 0) {
+      total = n
+      totalSource = name
+      break
+    }
+  }
+  const rawLen = list.length
+  const hasTotal = totalSource !== 'fallback'
+  if (!hasTotal) total = opts.songBegin + tracks.length + (rawLen >= songNum ? 1 : 0)
+  const more = hasTotal ? opts.songBegin + rawLen < total : rawLen >= songNum
+  const nextBegin = opts.songBegin + rawLen
+  debug?.(
+    `diss disstid=${opts.disstid ?? 0} dirid=${opts.dirid ?? 0} begin=${opts.songBegin} ` +
+    `raw=${rawLen} kept=${tracks.length} total=${total}(${totalSource}) more=${more}`,
+  )
+  return { tracks, total, more, nextBegin, totalSource }
 }

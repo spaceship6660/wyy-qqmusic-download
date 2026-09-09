@@ -178,7 +178,8 @@ async function logout(): Promise<void> {
   <div class="login-btn-wrap">
     <button v-if="!loggedIn" class="login-btn" @click="startLogin">登录 QQ</button>
     <div v-else class="login-row">
-      <span class="logged" :title="uin">已登录{{ uin ? `（${uin}）` : '' }}</span>
+      <span class="acct-src">QQ音乐</span>
+      <span class="acct-info">已登录</span>
       <button class="logout-btn" @click="logout">退出</button>
     </div>
 
@@ -223,15 +224,6 @@ async function logout(): Promise<void> {
 }
 .login-btn:hover { background: #27ab6b; }
 .login-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.logged {
-  font-size: 13px;
-  color: #31c27c;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
 .logout-btn {
   padding: 4px 10px;
   font-size: 12px;

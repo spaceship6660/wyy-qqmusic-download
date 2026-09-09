@@ -408,18 +408,36 @@ async function openAlbum(mid: string | number, title: string, force = false): Pr
   })
 }
 
-/** 歌单/喜欢懒加载：翻到哪加载到哪（QQ：CgiGetDiss 分页；网易云：trackIds → song/detail 分批） */
+/** QQ 翻页游标：非空页永远保留探下一页——总数缺失/错值时这是唯一不早停的办法；
+ * 仅当总数来自服务端且已覆盖时才收尾（省一次探底请求）。 */
+function qqPageCursor(
+  r: any,
+  base: { disstid?: number; dirid?: number },
+  defaultBegin: number,
+): LoadCursor | undefined {
+  const nb = typeof r?.nextBegin === 'number' ? r.nextBegin : defaultBegin
+  const covered = typeof r?.total === 'number' && r?.totalSource !== undefined
+    && r.totalSource !== 'fallback' && nb >= r.total
+  return covered ? undefined : { kind: 'qq-diss', ...base, begin: nb }
+}
+
+/** 歌单/喜欢懒加载：翻到哪加载到哪（QQ：CgiGetDiss 分页；网易云：trackIds → song/detail 分批）。
+ * 空页/失败≠到底：起始位置还没到总数时保留游标并给出原因，可点「加载更多」手动重试
+ * （此前静默吞错 + 空页直接判到底，超长歌单滚着滚着就停了还看不到任何提示）。 */
 async function loadMoreSongs(): Promise<void> {
   const v = songsView.value
   if (!v?.cursor || loadingMore.value) return
   const startedKey = v.cacheKey
   loadingMore.value = true
+  listNotice.value = ''
   // 去重：切走又秒回（缓存渲染）时，在途旧请求的追加不能产生重复行
   const dedupe = (incoming: any[]): any[] => {
     if (!Array.isArray(incoming)) return []
     const seen = new Set(store.tracks.map((t) => t.id))
     return incoming.filter((t) => t?.id && !seen.has(t.id))
   }
+  // 空页时是否真的到底：起始位置已达总数才算到底，否则保留游标可重试
+  const reachEnd = (pos: number, total?: number): boolean => typeof total !== 'number' || pos >= total
   try {
     if (v.cursor.kind === 'qq-diss') {
       const r: any = await api.invoke('qq:dissTracks', {
@@ -429,14 +447,25 @@ async function loadMoreSongs(): Promise<void> {
       })
       if (songsView.value?.cacheKey !== startedKey) return // 中途切走了，本次结果丢弃
       if (r?.tracks?.length) {
-        store.appendTracks(dedupe(r.tracks))
-        songsView.value = {
-          ...v,
-          total: r.total,
-          cursor: { ...v.cursor, begin: v.cursor.begin + r.tracks.length },
+        const fresh = dedupe(r.tracks)
+        // 游标按原始条数推进（主进程 nextBegin；无 mid 被滤掉时渲染数更少，不能按渲染数推进）
+        const nb = typeof r.nextBegin === 'number' ? r.nextBegin : v.cursor.begin + r.tracks.length
+        if (fresh.length === 0) {
+          // 整页重复：服务端疑似无视 begin 反复给旧页，再拉也是重复，直接收尾防无限请求
+          songsView.value = { ...v, total: typeof r.total === 'number' ? r.total : v.total, cursor: undefined }
+          listNotice.value = '后续无新歌曲，已停止加载（如数量不对可点 ↻ 刷新重试）'
+        } else {
+          store.appendTracks(fresh)
+          songsView.value = {
+            ...v,
+            total: r.total,
+            cursor: qqPageCursor(r, { disstid: v.cursor.disstid, dirid: v.cursor.dirid }, nb),
+          }
         }
-      } else if (r) {
+      } else if (reachEnd(v.cursor.begin, v.total)) {
         songsView.value = { ...v, cursor: undefined } // 到底
+      } else {
+        listNotice.value = '本页为空（可能被限流），可稍后点「加载更多」重试'
       }
     } else {
       const r: any = await api.invoke('ne:playlistPage', { id: v.cursor.id, offset: v.cursor.offset, limit: 200 })
@@ -451,8 +480,10 @@ async function loadMoreSongs(): Promise<void> {
           total: r.total,
           cursor: r.more ? { ...v.cursor, offset: next } : undefined,
         }
-      } else if (r) {
-        songsView.value = { ...v, cursor: undefined }
+      } else if (reachEnd(v.cursor.offset, v.total)) {
+        songsView.value = { ...v, cursor: undefined } // 到底
+      } else {
+        listNotice.value = '本页为空（可能被限流），可稍后点「加载更多」重试'
       }
     }
     // 缓存写穿：追加页同步进内存缓存（保留首屏快照与抓取时间），下次切回直接秒开全量已加载部分
@@ -462,6 +493,10 @@ async function loadMoreSongs(): Promise<void> {
     if (ck && sv && ck === startedKey && prev) {
       cacheSongs(ck, { ...prev, tracks: [...store.tracks], total: sv.total, cursor: sv.cursor, source: sv.source })
     }
+  } catch (e) {
+    // 翻页失败保留游标 + 显示原因（此前异常直接吞掉，滚到底没反应还以为到底了）
+    if (songsView.value?.cacheKey !== startedKey) return
+    listNotice.value = `加载更多失败（${e instanceof Error ? e.message : String(e)}），可稍后点「加载更多」重试`
   } finally {
     loadingMore.value = false
     // 兜底自动续拉：窗口很高/首屏条目少时内容填不满视口，用户无处滚动触发 onContentScroll，
@@ -512,8 +547,11 @@ async function openLiked(source: 'qq' | 'netease', force = false): Promise<void>
       fetchFirst: async () => {
         const r: any = await api.invoke('qq:dissTracks', { dirid: 201, songBegin: 0 })
         if (!r?.tracks?.length) return null
-        const cursor: LoadCursor | undefined = r.more ? { kind: 'qq-diss', dirid: 201, begin: r.tracks.length } : undefined
-        return { tracks: r.tracks, total: r.total, cursor }
+        return {
+          tracks: r.tracks,
+          total: r.total,
+          cursor: qqPageCursor(r, { dirid: 201 }, r.tracks.length),
+        }
       },
       reload: () => openLiked('qq', true),
     })
@@ -597,8 +635,11 @@ async function openPlaylist(source: 'qq' | 'netease', id: string | number, title
     fetchFirst: async () => {
       const r: any = await api.invoke('qq:dissTracks', { disstid: Number(id), songBegin: 0 })
       if (!r?.tracks?.length) return null
-      const cursor: LoadCursor | undefined = r.more ? { kind: 'qq-diss', disstid: Number(id), begin: r.tracks.length } : undefined
-      return { tracks: r.tracks, total: r.total, cursor }
+      return {
+        tracks: r.tracks,
+        total: r.total,
+        cursor: qqPageCursor(r, { disstid: Number(id) }, r.tracks.length),
+      }
     },
     reload: () => openPlaylist(source, id, title, true),
   })
@@ -769,10 +810,11 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         />
         <div class="ne-auth">
           <button v-if="!store.neLoggedIn" class="login-btn ne" @click="neLogin">登录网易云</button>
-          <template v-else>
-            <span class="logged" :title="neNickname">网易云已登录{{ neNickname ? `（${neNickname}）` : '' }}</span>
-            <button class="link-btn" @click="neLogout">退出登录</button>
-          </template>
+          <div v-else class="login-row">
+            <span class="acct-src">网易云</span>
+            <span class="acct-info">已登录</span>
+            <button class="link-btn" @click="neLogout">退出</button>
+          </div>
         </div>
       </div>
     </aside>
@@ -908,12 +950,10 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
 .sidebar nav button.active { font-weight: 700; color: #fff; background: #31c27c; }
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
 .ne-auth { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; }
-.ne-auth .logged {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ne-auth .link-btn { align-self: flex-start; }
+/* 账号行（QQ/网易云同构）：平台标签定宽不换行 + 状态 + 退出，全局样式同时作用于 LoginButton 内 */
+.login-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.acct-src { flex-shrink: 0; width: 46px; font-size: 12px; color: #999; white-space: nowrap; }
+.acct-info { flex: 1; min-width: 0; font-size: 13px; color: #31c27c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .login-btn.ne { background: #d43c33; }
 .login-btn.ne:hover { background: #b73229; }
 .link-btn {
@@ -924,6 +964,7 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
   border: none;
   border-radius: 6px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 .link-btn:hover { color: #d32f2f; background: #fdecea; }
 .logged { font-size: 13px; color: #31c27c; }
