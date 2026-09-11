@@ -50,8 +50,14 @@ async function startServer(delayMs = 0) {
  */
 function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[] }) {
   let vkeyCalls = 0
-  return vi.fn(async (input: any, init?: RequestInit) => {
+  const mock = vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
+    if (url.includes('musicu.fcg')) {
+      // 记录每次 musicu 请求的 cookie 头（下载身份用例：账户态带 cookie，匿名态不带）
+      ;(mock as any).musicuCookies.push(
+        (init?.headers as Record<string, string> | undefined)?.['cookie'] ?? '',
+      )
+    }
     if (url.includes('/api/song/enhance/player/url')) {
       // 网易云直链：本地 server 的 /ne.mp3（320 档直接命中，不触发降级）
       return new Response(JSON.stringify({
@@ -110,6 +116,8 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
     }
     return new Response('{}', { status: 404 })
   }) as unknown as typeof fetch
+  ;(mock as any).musicuCookies = [] as string[]
+  return mock as unknown as typeof fetch
 }
 
 interface Env {
@@ -119,6 +127,7 @@ interface Env {
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
   events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[] }
+  fetchMock: ReturnType<typeof vi.fn>
 }
 
 const envs: Env[] = []
@@ -161,7 +170,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
       }
     },
   })
-  const env: Env = { app, dir, dl, server, recorded, events }
+  const env: Env = { app, dir, dl, server, recorded, events, fetchMock: fetchImpl as unknown as ReturnType<typeof vi.fn> }
   envs.push(env)
   return env
 }
@@ -279,6 +288,44 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.done).toBe(0)
     // ID 校验在创建下载目录之前抛出 → 目录可能不存在；存在则必须为空
     expect(fs.existsSync(env.dl) ? fs.readdirSync(env.dl) : []).toEqual([])
+  })
+
+  it('R1: 失败任务 retryFailed 按原参数重跑（连败两次，均有 failed 事件）', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: 'not-a-number', name: '坏 ID', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 1)
+    env.app.retryFailed('not-a-number')
+    await waitFor(() => env.events.failed >= 2)
+    expect(env.events.done).toBe(0)
+  })
+
+  it('R2: 未知 jobId 重试抛错（重启后记录清空需重新勾选）', async () => {
+    const env = await makeEnv()
+    expect(() => env.app.retryFailed('no-such-job')).toThrow(/重新勾选/)
+  })
+
+  it('R3: QQ 下载身份切换——账户态 vkey 带 cookie，匿名态不带', async () => {
+    const env = await makeEnv()
+    // 模拟扫码登录成功：主 client 挂上凭证
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    const cookies = () => (env.fetchMock as any).musicuCookies as string[]
+    // 默认 account：vkey 带登录 cookie
+    env.app.enqueue({ tracks: [track('q1', '身份歌')], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 1)
+    const firstBatch = [...cookies()]
+    expect(firstBatch.length).toBeGreaterThan(0)
+    expect(firstBatch.every((c) => c.includes('qqmusic_key=k'))).toBe(true)
+    // 切匿名：该批所有 musicu 调用（vkey/detail）都不带 cookie（anon client 永不 setAuth）
+    env.app.settingsSet({ qqIdentity: 'anon' })
+    env.app.enqueue({ tracks: [track('q2', '匿名歌')], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 2)
+    const secondBatch = cookies().slice(firstBatch.length)
+    expect(secondBatch.length).toBeGreaterThan(0)
+    expect(secondBatch.every((c) => !c.includes('qqmusic_key'))).toBe(true)
   })
 
   it('N1b: per-batch lyricMode 覆盖设置默认（enqueue lyricMode:none → 不内嵌歌词）', async () => {

@@ -8,6 +8,7 @@ import NeteaseTab from './components/NeteaseTab.vue'
 import DecryptTab from './components/DecryptTab.vue'
 import DownloadPage from './components/DownloadPage.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
+import DownloadFloatCard from './components/DownloadFloatCard.vue'
 import { useDownloadStore } from './stores/download'
 import type { UiTrack } from './stores/download'
 import { api } from './api'
@@ -51,6 +52,9 @@ const listLoading = ref(false)
 const ctxSource = computed<'qq' | 'netease'>(() => songsView.value?.source ?? (tab.value === 'netease' ? 'netease' : 'qq'))
 const selectedCount = computed(() => store.selectedIds.size)
 const activeCount = computed(() => store.queue.filter((j) => j.state === 'queued' || j.state === 'running').length)
+/** 左上浮卡数据源 + 收起态（触发下载时自动展开） */
+const activeJobs = computed(() => store.queue.filter((j) => j.state === 'queued' || j.state === 'running'))
+const dlCardCollapsed = ref(false)
 const doneCount = computed(() => store.queue.filter((j) => j.state === 'done' || j.state === 'failed').length)
 const neUid = ref(0)
 const neNickname = ref('')
@@ -689,7 +693,9 @@ async function downloadSelected(): Promise<void> {
         tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: ctxSource.value,
       })
       store.clear()
-      // 不跳页：留在当前列表继续勾选，进度看底部工具栏「下载中 N」→ 点进去即到我的下载
+      // 不跳页：留在当前列表继续勾选，进度看底部工具栏「下载中 N」→ 点进去即到我的下载；
+      // 左上浮卡自动弹出（可收起）
+      dlCardCollapsed.value = false
     }
   } catch (e) {
     window.alert(e instanceof Error ? e.message : String(e))
@@ -898,6 +904,15 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
       <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>
+
+    <!-- 左上下载浮卡（下载页内不重复显示） -->
+    <DownloadFloatCard
+      v-if="tab !== 'download'"
+      :jobs="activeJobs"
+      :collapsed="dlCardCollapsed"
+      @toggle="dlCardCollapsed = !dlCardCollapsed"
+      @open="goTab('download')"
+    />
 
     <!-- 窗口底部固定工具栏：下载按钮永远可见（不再翻列表） -->
     <footer class="toolbar">

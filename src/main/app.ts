@@ -47,14 +47,25 @@ export function createApp(deps: AppDeps) {
   const cookieFile = path.join(deps.userDataDir, 'qqmusic_cookie.json')
   const fetchImpl = deps.fetchImpl ?? fetch
   const client = createQqClient(fetchImpl, { uin: '0' })
+  // 匿名下载专用 client（永不 setAuth/挂 cookie；下载身份=匿名时直链/详情/歌词全走它）
+  const anonQqClient = createQqClient(fetchImpl, { uin: '0' })
   const auth = createAuth({ qqClient: client, fetchImpl, cookiePath: cookieFile, debugLogFile: deps.debugLogFile })
   const neClient = createNeClient(fetchImpl)
+  const anonNeClient = createNeClient(fetchImpl) // 同上：匿名下载专用，永不挂 MUSIC_U
   const neAuth = createNeAuth({ cookiePath: path.join(deps.userDataDir, 'netease_cookie.json') })
   const savedNe = neAuth.getCookie()
   if (savedNe) neClient.setCookie(savedNe)
   let settings = loadSettings(settingsFile)
 
   const emitEvent = deps.emitEvent ?? (() => {})
+
+  // 失败重试登记：jobId → 原入队参数（本 session 有效；渲染侧失败行“重试”按钮用）
+  const jobSpecs = new Map<string, {
+    track: TrackDTO
+    quality: Settings['quality']
+    lyricMode?: Settings['lyricMode']
+    source: 'qq' | 'netease'
+  }>()
 
   // 诊断日志 appender（vkey 全档失败现场 / 收藏接口字段史；仅 keys 与有无标记，不记密钥与直链）
   const dbgFile = deps.debugLogFile
@@ -148,11 +159,13 @@ export function createApp(deps: AppDeps) {
     runner: async (job, report) => {
       // 按 source 选 wrapper：一个参数化点集合 = 一条管线（QQ / 网易云）
       if (job.source === 'netease') return runNeteaseJob(job, report)
+      // 下载身份：匿名时直链/详情/歌词全走无凭证 client（歌单浏览不受影响，仍用登录态）
+      const qc = settings.qqIdentity === 'anon' ? anonQqClient : client
       return runDownloadJob(job, report, {
-        resolveOnce: (q) => getAudioUrl(client, job.track.id, job.track.mediaMid, q, dbgFile),
+        resolveOnce: (q) => getAudioUrl(qc, job.track.id, job.track.mediaMid, q, dbgFile),
         extFor: (q) => QUALITY_MAP[q].ext,
-        fetchDetail: () => getTrackDetail(client, job.track.id),
-        fetchLyrics: () => fetchLyric(client, job.track.id),
+        fetchDetail: () => getTrackDetail(qc, job.track.id),
+        fetchLyrics: () => fetchLyric(qc, job.track.id),
       })
     },
   })
@@ -168,11 +181,12 @@ export function createApp(deps: AppDeps) {
   const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void): Promise<{ outputPath?: string } | void> => {
     const id = Number(job.track.id)
     if (!Number.isFinite(id)) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
+    const nc = settings.neIdentity === 'anon' ? anonNeClient : neClient
     return runDownloadJob(job, report, {
-      resolveOnce: (q) => neGetAudioUrl(neClient, id, q, dbgFile),
+      resolveOnce: (q) => neGetAudioUrl(nc, id, q, dbgFile),
       extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
-      fetchDetail: () => neGetTrackDetail(neClient, id),
-      fetchLyrics: () => neFetchLyric(neClient, id),
+      fetchDetail: () => neGetTrackDetail(nc, id),
+      fetchLyrics: () => neFetchLyric(nc, id),
     })
   }
 
@@ -284,17 +298,37 @@ export function createApp(deps: AppDeps) {
       // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
-      queue.enqueue(
-        tracks
-          .filter((t) => {
-            if (seen.has(t.id)) return false
-            seen.add(t.id)
-            return true
-          })
-          .map((t) => ({
-            id: t.id, source, track: t, quality, lyricMode, state: 'queued' as const, progress: 0,
-          })),
-      )
+      const jobs: DownloadJob[] = []
+      for (const t of tracks) {
+        if (seen.has(t.id)) continue
+        seen.add(t.id)
+        jobSpecs.set(t.id, { track: t, quality, lyricMode, source })
+        jobs.push({
+          id: t.id, source, track: t, quality, lyricMode, state: 'queued' as const, progress: 0,
+        })
+      }
+      // spec 登记上限 500（LRU 淘汰最旧；重启后清空，重试需重新勾选）
+      while (jobSpecs.size > 500) {
+        const oldest = jobSpecs.keys().next()
+        if (oldest.done) break
+        jobSpecs.delete(oldest.value)
+      }
+      queue.enqueue(jobs)
+      return true
+    },
+    /** 失败重试：按登记的原参数重新入队（同 id，渲染侧原地更新状态） */
+    retryFailed: (jobId: string) => {
+      const spec = jobSpecs.get(jobId)
+      if (!spec) throw new Error('找不到该任务记录（应用重启后记录清空），请重新勾选下载')
+      queue.enqueue([{
+        id: jobId,
+        source: spec.source,
+        track: spec.track,
+        quality: spec.quality,
+        lyricMode: spec.lyricMode,
+        state: 'queued' as const,
+        progress: 0,
+      }])
       return true
     },
     settingsGet: () => settings,

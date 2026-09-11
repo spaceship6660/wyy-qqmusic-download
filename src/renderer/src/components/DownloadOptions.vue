@@ -1,9 +1,20 @@
 <script setup lang="ts">
 import { useDownloadStore } from '../stores/download'
+import { api } from '../api'
 
-// 下载时选择器：码率 + 歌词模式（本次下载批次生效；设置页存的是默认值，
-// 启动时由 App.vue 从 settings:get 载入 store 作为当前选择）
+// 下载时选择器：码率 + 歌词模式（本次下载批次生效；改动即持久化为默认值，
+// 下次打开接着用——设置页存的是同一份，启动时由 App.vue 从 settings:get 载入 store）
 const store = useDownloadStore()
+
+function setQuality(q: 'flac' | 'ape' | '320' | '128' | 'm4a'): void {
+  store.setQuality(q)
+  void api.invoke('settings:set', { quality: q })
+}
+
+function setLyricMode(m: 'both' | 'embed' | 'lrc' | 'none'): void {
+  store.setLyricMode(m)
+  void api.invoke('settings:set', { lyricMode: m })
+}
 
 const QUALITIES: Array<{ v: 'flac' | 'ape' | '320' | '128' | 'm4a'; label: string }> = [
   { v: 'flac', label: '无损' },
@@ -24,12 +35,12 @@ const LYRIC_MODES: Array<{ v: 'both' | 'embed' | 'lrc' | 'none'; label: string }
   <div class="download-options">
     <span class="label">码率</span>
     <label v-for="q in QUALITIES" :key="q.v" class="opt">
-      <input type="radio" name="quality" :value="q.v" :checked="store.quality === q.v" @change="store.setQuality(q.v)" />
+      <input type="radio" name="quality" :value="q.v" :checked="store.quality === q.v" @change="setQuality(q.v)" />
       {{ q.label }}
     </label>
     <span class="label">歌词</span>
     <label v-for="m in LYRIC_MODES" :key="m.v" class="opt">
-      <input type="radio" name="lyric-mode" :value="m.v" :checked="store.lyricMode === m.v" @change="store.setLyricMode(m.v)" />
+      <input type="radio" name="lyric-mode" :value="m.v" :checked="store.lyricMode === m.v" @change="setLyricMode(m.v)" />
       {{ m.label }}
     </label>
   </div>

@@ -11,6 +11,8 @@ interface UiSettings {
   downloadDir: string
   lyricMode: 'both' | 'embed' | 'lrc' | 'none'
   decryptOutDir: string
+  qqIdentity: 'account' | 'anon'
+  neIdentity: 'account' | 'anon'
 }
 
 const settings = ref<UiSettings>({
@@ -19,6 +21,8 @@ const settings = ref<UiSettings>({
   downloadDir: 'downloads',
   lyricMode: 'both',
   decryptOutDir: 'decrypted',
+  qqIdentity: 'account',
+  neIdentity: 'account',
 })
 const loaded = ref(false)
 const dirNotice = ref('')
@@ -29,7 +33,7 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null
 onMounted(async () => {
   try {
     const s = await api.invoke('settings:get')
-    if (s) settings.value = { quality: s.quality ?? '320', concurrency: s.concurrency ?? 2, downloadDir: s.downloadDir ?? '', lyricMode: s.lyricMode ?? 'both', decryptOutDir: s.decryptOutDir ?? '' }
+    if (s) settings.value = { quality: s.quality ?? '320', concurrency: s.concurrency ?? 2, downloadDir: s.downloadDir ?? '', lyricMode: s.lyricMode ?? 'both', decryptOutDir: s.decryptOutDir ?? '', qqIdentity: s.qqIdentity ?? 'account', neIdentity: s.neIdentity ?? 'account' }
   } catch {
     // 读取失败则保留默认值
   }
@@ -74,6 +78,11 @@ function setLyricMode(m: UiSettings['lyricMode']): void {
   settings.value.lyricMode = m
   store.setLyricMode(m) // 与码率一致：store 为当前下载选择的单一事实源，改了默认值即同步当前选择
   save({ lyricMode: m })
+}
+
+function setIdentity(which: 'qqIdentity' | 'neIdentity', v: 'account' | 'anon'): void {
+  settings.value[which] = v
+  save({ [which]: v })
 }
 
 /** Electron 限制：webkitdirectory 拿不到绝对路径；经 preload 的 webUtils.getPathForFile 取绝对路径 */
@@ -147,6 +156,32 @@ function pickDecryptDir(e: Event): void {
           <label class="pick-btn">
             选择目录
             <input type="file" webkitdirectory class="hidden-input" @change="pickDecryptDir" />
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label">QQ 下载身份（只影响下载直链；歌单浏览仍用登录态）</span>
+        <div class="radios">
+          <label>
+            <input type="radio" value="account" :checked="settings.qqIdentity === 'account'" @change="setIdentity('qqIdentity', 'account')" />
+            登录账户
+          </label>
+          <label>
+            <input type="radio" value="anon" :checked="settings.qqIdentity === 'anon'" @change="setIdentity('qqIdentity', 'anon')" />
+            匿名（账户下不动时试试；匿名拿不到无损）
+          </label>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label">网易云下载身份（只影响下载直链；歌单浏览仍用登录态）</span>
+        <div class="radios">
+          <label>
+            <input type="radio" value="account" :checked="settings.neIdentity === 'account'" @change="setIdentity('neIdentity', 'account')" />
+            登录账户
+          </label>
+          <label>
+            <input type="radio" value="anon" :checked="settings.neIdentity === 'anon'" @change="setIdentity('neIdentity', 'anon')" />
+            匿名（账户下不动时试试；匿名拿不到无损）
           </label>
         </div>
       </div>
