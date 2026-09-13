@@ -777,6 +777,7 @@ onMounted(() => {
     if (s?.quality) store.setQuality(s.quality)
     if (s?.lyricMode) store.setLyricMode(s.lyricMode)
   })
+  api.on('dl:queued', store.onQueueEvent)
   api.on('dl:jobStart', store.onQueueEvent)
   api.on('dl:progress', store.onQueueEvent)
   api.on('dl:done', store.onQueueEvent)

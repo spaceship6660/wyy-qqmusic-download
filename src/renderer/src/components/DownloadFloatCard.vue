@@ -1,36 +1,75 @@
 <script setup lang="ts">
 import type { UiQueueJob } from '../stores/download'
 
-// 左上下载浮卡：有进行中任务时悬浮显示当前曲目与进度，可收起；点标题进我的下载
+// 左上下载浮卡：有排队/进行中任务时常驻显示，可手动「隐藏」折叠成侧边小标签（下载不中断）。
+// 点标题进我的下载；折叠态小标签点一下恢复。
 defineProps<{ jobs: UiQueueJob[]; collapsed: boolean }>()
 const emit = defineEmits<{ toggle: []; open: [] }>()
 
 function stateText(j: UiQueueJob): string {
-  if (j.state === 'queued') return '等待中'
+  if (j.state === 'queued') return '排队中'
   if (j.state === 'running') return `${Math.min(100, Math.max(0, j.progress))}%`
   return j.state
 }
 </script>
 
 <template>
-  <div v-if="jobs.length" class="dl-float">
-    <div class="dl-head">
-      <span class="dl-title" @click="emit('open')" title="前往我的下载">下载中（{{ jobs.length }}）</span>
-      <button class="dl-btn" @click="emit('toggle')">{{ collapsed ? '展开' : '收起' }}</button>
-    </div>
-    <div v-if="!collapsed" class="dl-list">
-      <div v-for="j in jobs" :key="j.id" class="dl-row">
-        <div class="dl-name" :title="j.artist ? `${j.name} - ${j.artist}` : j.name">
-          {{ j.name }}<span v-if="j.artist" class="dl-artist"> - {{ j.artist }}</span>
+  <div v-if="jobs.length">
+    <!-- 折叠态：贴左侧边的竖向小标签（下载继续，点击展开） -->
+    <button v-if="collapsed" class="dl-tab" title="展开下载列表" @click="emit('toggle')">
+      <span class="dl-tab-dot"></span>
+      <span class="dl-tab-text">下载 {{ jobs.length }}</span>
+    </button>
+
+    <!-- 展开态：完整浮卡 -->
+    <div v-else class="dl-float">
+      <div class="dl-head">
+        <span class="dl-title" title="前往我的下载" @click="emit('open')">下载中（{{ jobs.length }}）</span>
+        <button class="dl-btn" @click="emit('toggle')">隐藏</button>
+      </div>
+      <div class="dl-list">
+        <div v-for="j in jobs" :key="j.id" class="dl-row">
+          <div class="dl-name" :title="j.artist ? `${j.name} - ${j.artist}` : j.name">
+            {{ j.name }}<span v-if="j.artist" class="dl-artist"> - {{ j.artist }}</span>
+          </div>
+          <div class="dl-bar"><div class="dl-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
+          <span class="dl-pct">{{ stateText(j) }}</span>
         </div>
-        <div class="dl-bar"><div class="dl-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
-        <span class="dl-pct">{{ stateText(j) }}</span>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.dl-tab {
+  position: fixed;
+  left: 0;
+  top: 44%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  background: #31c27c;
+  color: #fff;
+  border: none;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  box-shadow: 2px 0 10px rgba(49, 194, 124, 0.35);
+  z-index: 15;
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  font-weight: 700;
+}
+.dl-tab:hover { filter: brightness(1.06); }
+.dl-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fff;
+  animation: dl-pulse 1s infinite;
+}
+@keyframes dl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.dl-tab-text { letter-spacing: 1px; }
 .dl-float {
   position: fixed;
   left: 202px;

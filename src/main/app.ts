@@ -212,6 +212,7 @@ export function createApp(deps: AppDeps) {
   })
 
   // 队列事件 → 渲染器（浅拷贝快照，避免活引用语义陷阱）
+  queue.on('jobQueued', (j) => emitEvent('dl:queued', { ...j }))
   queue.on('jobStart', (j) => emitEvent('dl:jobStart', { ...j }))
   queue.on('jobProgress', (j) => emitEvent('dl:progress', { ...j }))
   queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))

@@ -78,4 +78,20 @@ describe('DownloadQueue', () => {
     await q.waitIdle(3000)
     expect(seen.sort()).toEqual(['netease', 'qq'])
   })
+
+  it('入队即广播 jobQueued：并发已满时排队中的任务也能被渲染侧看到', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const q = new DownloadQueue({
+      concurrency: 1,
+      rateLimiter: { wait: async () => { await gate } } as any,
+      runner: async () => { await new Promise((r) => setTimeout(r, 5)) },
+    })
+    const queued: string[] = []
+    q.on('jobQueued', (j: DownloadJob) => queued.push(j.id))
+    q.enqueue([job('a'), job('b'), job('c')])
+    expect(queued).toEqual(['a', 'b', 'c']) // 三个都在排队事件里，而不是只有被调度的 a
+    release()
+    await q.waitIdle(3000)
+  })
 })

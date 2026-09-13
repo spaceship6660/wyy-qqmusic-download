@@ -35,7 +35,12 @@ export class DownloadQueue extends EventEmitter {
   }
 
   enqueue(jobs: DownloadJob[]): void {
-    this.queue.push(...jobs)
+    for (const j of jobs) {
+      this.queue.push(j)
+      // 入队即广播（此前的 bug：排队中的任务要等被调度才 emit jobStart，
+      // 渲染侧「下载中」列表在并发已满时看不到后面排队的歌）
+      this.emit('jobQueued', j)
+    }
     this.pump()
   }
 
