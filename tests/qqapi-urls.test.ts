@@ -56,6 +56,19 @@ describe('getAudioUrl', () => {
     expect((fetchMock as any).mock.calls.length).toBe(1)
   })
 
+  it('vkey 的 uin 回传登录账号（去 o 前缀；匿名=0）——VIP 直链按账号核发', async () => {
+    const logged = vi.fn(async () => new Response(fx())) as unknown as typeof fetch
+    await getAudioUrl(createQqClient(logged, { uin: 'o2727653933', cookie: 'x=y' }), 'M001', 'MED001', '320')
+    const b1 = JSON.parse((logged as any).mock.calls[0][1].body as string)
+    expect(b1.req_1.param.uin).toBe('2727653933')
+    expect(b1.comm.uin).toBe('o2727653933')
+
+    const anon = vi.fn(async () => new Response(fx())) as unknown as typeof fetch
+    await getAudioUrl(createQqClient(anon, { uin: '0' }), 'M001', 'MED001', '320')
+    const b2 = JSON.parse((anon as any).mock.calls[0][1].body as string)
+    expect(b2.req_1.param.uin).toBe('0')
+  })
+
   it('按 purl 实际前缀校正质量：M800 请求拿到 C400 流 → m4a+downgraded', async () => {
     const fetchMock = vi.fn(async () => new Response(fx())) as unknown as typeof fetch
     const client = createQqClient(fetchMock, { uin: 'o123', cookie: 'uin=o123; qqmusic_key=k' })
@@ -67,8 +80,7 @@ describe('getAudioUrl', () => {
     expect(init.headers.cookie).toContain('qqmusic_key')
   })
 
-  it('全部质量拿不到时抛 QqApiError(code=no-playable-url)', async () => {
-    const empty = '{"req_1":{"code":0,"data":{"sip":["https://dl.stream.qqmusic.qq.com/"],"midurlinfo":[{"songmid":"M001","purl":""}]}}}'
+  it('全部质量拿不到时抛 QqApiError(code=no-playable-url)', async () => {    const empty = '{"req_1":{"code":0,"data":{"sip":["https://dl.stream.qqmusic.qq.com/"],"midurlinfo":[{"songmid":"M001","purl":""}]}}}'
     const fetchMock = vi.fn(async () => new Response(empty)) as unknown as typeof fetch
     const client = createQqClient(fetchMock, { uin: '0' })
     const err = await getAudioUrl(client, 'M001', 'MED001', 'flac').catch((e) => e)

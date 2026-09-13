@@ -70,6 +70,9 @@ export async function getAudioUrl(
   const startIdx = QUALITY_LADDER.indexOf(preferred)
   const candidates = buildCandidates(songmid, mediaMid, preferred)
   const byFilename = new Map(candidates.map((c) => [c.filename, c.quality]))
+  // uin 必须回传登录账号（此前硬编码 '0'）：VIP/绿钻的直链权益按账号核发，
+  // 客户端 comm.uin 是登录号而 param.uin=0 会被服务端当匿名处理 → 全档空 purl。
+  const uin = client.getUin().replace(/^o/i, '') || '0'
 
   const data = (await client.postMusicu({
     req_1: {
@@ -80,7 +83,7 @@ export async function getAudioUrl(
         guid: String(Math.floor(Math.random() * 9_000_000_000) + 1_000_000_000),
         songmid: [songmid],
         songtype: [0],
-        uin: '0',
+        uin,
         loginflag: 1,
         platform: '20',
       },

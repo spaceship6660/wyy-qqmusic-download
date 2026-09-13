@@ -2,8 +2,8 @@
 import { ref, onUnmounted } from 'vue'
 import { api } from '../api'
 
-defineProps<{ loggedIn: boolean; uin: string }>()
-const emit = defineEmits<{ changed: [{ loggedIn: boolean; uin: string; hasEncUin?: boolean; loginMethod?: string }] }>()
+defineProps<{ loggedIn: boolean; uin: string; sessionExpired?: boolean }>()
+const emit = defineEmits<{ changed: [{ loggedIn: boolean; uin: string; hasEncUin?: boolean; loginMethod?: string; sessionExpired?: boolean }] }>()
 
 type QrPhase = 'idle' | 'loading' | 'waiting' | 'scanned' | 'finalizing'
 const qrOpen = ref(false)
@@ -45,7 +45,7 @@ function scheduleAutoClose(): void {
 
 async function refreshStatus(): Promise<void> {
   const s = await api.invoke('auth:status')
-  emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '', hasEncUin: !!s?.hasEncUin, loginMethod: s?.loginMethod ?? '' })
+  emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '', hasEncUin: !!s?.hasEncUin, loginMethod: s?.loginMethod ?? '', sessionExpired: !!s?.sessionExpired })
 }
 
 async function onPoll(): Promise<void> {
@@ -179,8 +179,9 @@ async function logout(): Promise<void> {
     <button v-if="!loggedIn" class="login-btn" @click="startLogin">登录 QQ</button>
     <div v-else class="login-row">
       <span class="acct-src">QQ音乐</span>
-      <span class="acct-info">已登录</span>
-      <button class="logout-btn" @click="logout">退出</button>
+      <span class="acct-info" :class="{ warn: sessionExpired }">{{ sessionExpired ? '登录已过期' : '已登录' }}</span>
+      <button v-if="sessionExpired" class="relogin-btn" @click="startLogin">重新登录</button>
+      <button v-else class="logout-btn" @click="logout">退出</button>
     </div>
 
     <div v-if="qrOpen" class="modal-mask" @click.self="closeQr">
@@ -235,6 +236,17 @@ async function logout(): Promise<void> {
   flex-shrink: 0;
 }
 .logout-btn:hover { color: #d32f2f; background: #fdecea; }
+.relogin-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: #fff;
+  background: #d9930e;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.relogin-btn:hover { background: #c07f0a; }
 .manual-btn {
   padding: 6px 12px;
   font-size: 12px;

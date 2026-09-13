@@ -60,6 +60,8 @@ const neUid = ref(0)
 const neNickname = ref('')
 /** QQ 登录是否带 EncryptUin（收藏歌单接口必需；手动导入 Cookie 没有） */
 const qqHasEncUin = ref(false)
+/** QQ 会话是否已失效（主进程下载时探活置位；UI 提示重新登录） */
+const qqSessionExpired = ref(false)
 /** QQ 凭证来源（qr/import）：区分“扫码仍无”与“手动导入本就没有” */
 const qqLoginMethod = ref('')
 /** 主进程诊断日志路径（扫码仍无 EncryptUin 时上报用） */
@@ -704,10 +706,11 @@ async function downloadSelected(): Promise<void> {
   }
 }
 
-function onQqLoginChanged(s: { loggedIn: boolean; uin?: string; hasEncUin?: boolean; loginMethod?: string }): void {
+function onQqLoginChanged(s: { loggedIn: boolean; uin?: string; hasEncUin?: boolean; loginMethod?: string; sessionExpired?: boolean }): void {
   store.setLogin(s.loggedIn, s.uin ?? '')
   qqHasEncUin.value = !!s.hasEncUin
   qqLoginMethod.value = s.loginMethod ?? ''
+  qqSessionExpired.value = !!s.sessionExpired
   if (s.loggedIn) void refreshQqPlaylists().catch(() => {})
   else {
     qqCreated.value = []
@@ -762,6 +765,7 @@ onMounted(() => {
     store.setLogin(!!s?.loggedIn, s?.uin ?? '')
     qqHasEncUin.value = !!s?.hasEncUin
     qqLoginMethod.value = s?.loginMethod ?? ''
+    qqSessionExpired.value = !!s?.sessionExpired
     if (typeof s?.diagLog === 'string') diagLogPath.value = s.diagLog
     if (s?.loggedIn) void refreshQqPlaylists().catch(() => {})
   })
@@ -776,7 +780,15 @@ onMounted(() => {
   api.on('dl:jobStart', store.onQueueEvent)
   api.on('dl:progress', store.onQueueEvent)
   api.on('dl:done', store.onQueueEvent)
-  api.on('dl:failed', store.onQueueEvent)
+  api.on('dl:failed', (job: any) => {
+    store.onQueueEvent(job)
+    // QQ 账户下载失败可能被主进程判定为登录过期：刷新 auth:status 让左下显示“重新登录”
+    if (job?.source === 'qq') {
+      void api.invoke('auth:status').then((s: any) => {
+        qqSessionExpired.value = !!s?.sessionExpired
+      })
+    }
+  })
   api.on('ne:authChanged', () => onNeAuthChanged())
 })
 
@@ -812,6 +824,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         <LoginButton
           :logged-in="store.loggedIn"
           :uin="store.uin"
+          :session-expired="qqSessionExpired"
           @changed="onQqLoginChanged"
         />
         <div class="ne-auth">

@@ -153,6 +153,32 @@ export function createApp(deps: AppDeps) {
     return { outputPath: dest }
   }
 
+  // QQ 登录态失效标记：置位后 authStatus 带 sessionExpired，UI 提示重新登录。
+  // 触发：账户身份下载取不到直链时，用一个需要登录的接口探活（能通=确实没版权，不通=会话过期）。
+  let qqSessionExpired = false
+  async function qqSessionAlive(): Promise<boolean> {
+    const s = auth.getStatus()
+    const uin = s.uin?.replace(/^o/i, '') ?? ''
+    if (!uin) return false
+    // 探测接口：GetPlaylistByUin 需登录态；空响应（风控）判不了——重试一次，仍空则按“未知”不置失效
+    for (let i = 0; i < 2; i++) {
+      try {
+        await getUserPlaylists(client, uin)
+        return true
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        const transient = /rate-limited|空响应|timeout|fetch failed|network/i.test(msg)
+        if (transient && i === 0) {
+          await new Promise((r) => setTimeout(r, 1200))
+          continue
+        }
+        if (transient) return true // 判不了，别误报过期
+        return false
+      }
+    }
+    return true
+  }
+
   const queue = new DownloadQueue({
     concurrency: settings.concurrency,
     rateLimiter: new RateLimiter(1000),
@@ -161,12 +187,27 @@ export function createApp(deps: AppDeps) {
       if (job.source === 'netease') return runNeteaseJob(job, report)
       // 下载身份：匿名时直链/详情/歌词全走无凭证 client（歌单浏览不受影响，仍用登录态）
       const qc = settings.qqIdentity === 'anon' ? anonQqClient : client
-      return runDownloadJob(job, report, {
-        resolveOnce: (q) => getAudioUrl(qc, job.track.id, job.track.mediaMid, q, dbgFile),
-        extFor: (q) => QUALITY_MAP[q].ext,
-        fetchDetail: () => getTrackDetail(qc, job.track.id),
-        fetchLyrics: () => fetchLyric(qc, job.track.id),
-      })
+      try {
+        const r = await runDownloadJob(job, report, {
+          resolveOnce: (q) => getAudioUrl(qc, job.track.id, job.track.mediaMid, q, dbgFile),
+          extFor: (q) => QUALITY_MAP[q].ext,
+          fetchDetail: () => getTrackDetail(qc, job.track.id),
+          fetchLyrics: () => fetchLyric(qc, job.track.id),
+        })
+        if (qc === client && settings.qqIdentity === 'account') qqSessionExpired = false
+        return r
+      } catch (e) {
+        // 账户身份拿不到直链：探活一次，过期则给出可操作提示（重新登录），
+        // 未过期才保留“无下载版权/权益不足”的原始语义（“明明有绿钻却失败”多半是这里）
+        if (qc === client && settings.qqIdentity === 'account') {
+          const alive = await qqSessionAlive()
+          if (!alive) {
+            qqSessionExpired = true
+            throw new Error('QQ 登录已过期（接口已失效，故直链取不到）。请在左下角重新登录后重试')
+          }
+        }
+        throw e
+      }
     },
   })
 
@@ -342,24 +383,31 @@ export function createApp(deps: AppDeps) {
     authPoll: () => auth.poll(),
     authWaitResult: async (ms: number) => {
       const res = await auth.waitForResult(ms)
+      if (res.ok) qqSessionExpired = false
       // 失败时把诊断日志路径带进 UI（仅排障用；诊断文件在 userData，不入库、不打印内容）
       if (!res.ok && deps.debugLogFile) return { ok: false, reason: `${res.reason}\n（诊断日志：${deps.debugLogFile}）` }
       return res
     },
-    authImportCookie: (cookie: string) => auth.importCookie(cookie),
+    authImportCookie: (cookie: string) => {
+      const ok = auth.importCookie(cookie)
+      if (ok) qqSessionExpired = false
+      return ok
+    },
     authClear: () => {
       auth.clear()
+      qqSessionExpired = false
       return true
     },
     authStatus: () => {
       const s = auth.getStatus()
       // hasEncUin：收藏歌单（CgiGetPlaylistFavInfo）必需；手动导入的 Cookie 没有它，
-      // 渲染侧据此给出精确提示；loginMethod 区分扫码/导入；diagLog 供用户上报排障日志
+      // 渲染侧据此给出精确提示；loginMethod 区分扫码/导入；sessionExpired=下载时探测到会话失效
       return {
         loggedIn: s.state === 'loggedIn',
         uin: s.uin,
         hasEncUin: !!auth.getEncHostUin(),
         loginMethod: auth.getLoginMethod(),
+        sessionExpired: qqSessionExpired,
         diagLog: deps.debugLogFile ?? '',
       }
     },

@@ -48,7 +48,7 @@ async function startServer(delayMs = 0) {
  *   （postMusicu 路径缺失 → QqApiError）。
  * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
  */
-function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[] }) {
+function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean }) {
   let vkeyCalls = 0
   const mock = vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
@@ -85,7 +85,7 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
               code: 0,
               data: {
                 sip: [`http://127.0.0.1:${opts.port}/`],
-                midurlinfo: filenames.map((filename) => ({ songmid, filename, purl: purl || filename })),
+                midurlinfo: filenames.map((filename) => ({ songmid, filename, purl: opts.deadVkey ? '' : (purl || filename) })),
               },
             },
           }),
@@ -139,7 +139,7 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[] } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
@@ -147,7 +147,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
     JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0)
-  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits })
+  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey })
   const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[] }
   const app = createApp({
     userDataDir: dir,
@@ -306,6 +306,17 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   it('R2: 未知 jobId 重试抛错（重启后记录清空需重新勾选）', async () => {
     const env = await makeEnv()
     expect(() => env.app.retryFailed('no-such-job')).toThrow(/重新勾选/)
+  })
+
+  it('R4: 账户身份全档空 purl + 探活失败 → 报「登录已过期」，authStatus.sessionExpired=true', async () => {
+    const env = await makeEnv({ deadVkey: true })
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    env.app.enqueue({ tracks: [track('q9', '绿钻歌')], quality: 'flac', source: 'qq' })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.app.authStatus().sessionExpired).toBe(true)
+    // 重新导入凭证清标记
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    expect(env.app.authStatus().sessionExpired).toBe(false)
   })
 
   it('R3: QQ 下载身份切换——账户态 vkey 带 cookie，匿名态不带', async () => {

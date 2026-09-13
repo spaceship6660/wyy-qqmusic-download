@@ -119,7 +119,7 @@ export function createQqClient(fetchImpl: FetchLike, auth: QqAuthState) {
     throw lastErr instanceof Error ? lastErr : new QqApiError(String(lastErr))
   }
 
-  return { postMusicu, setAuth, get }
+  return { postMusicu, setAuth, get, getUin: () => currentAuth.uin }
 }
 
 export type QqClient = ReturnType<typeof createQqClient>
