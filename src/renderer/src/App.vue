@@ -821,6 +821,13 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         <button :class="{ active: tab === 'decrypt' }" @click="goTab('decrypt')">解密</button>
         <button :class="{ active: tab === 'settings' }" @click="goTab('settings')">设置</button>
       </nav>
+      <!-- 侧栏下载卡：导航下方空白区（有排队/进行中任务时常驻，可收起） -->
+      <DownloadFloatCard
+        :jobs="activeJobs"
+        :collapsed="dlCardCollapsed"
+        @toggle="dlCardCollapsed = !dlCardCollapsed"
+        @open="goTab('download')"
+      />
       <div class="sidebar-foot">
         <LoginButton
           :logged-in="store.loggedIn"
@@ -918,15 +925,6 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
       <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>
     </main>
-
-    <!-- 左上下载浮卡（下载页内不重复显示） -->
-    <DownloadFloatCard
-      v-if="tab !== 'download'"
-      :jobs="activeJobs"
-      :collapsed="dlCardCollapsed"
-      @toggle="dlCardCollapsed = !dlCardCollapsed"
-      @open="goTab('download')"
-    />
 
     <!-- 窗口底部固定工具栏：下载按钮永远可见（不再翻列表） -->
     <footer class="toolbar">

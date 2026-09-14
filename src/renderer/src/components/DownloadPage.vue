@@ -75,8 +75,9 @@ async function retry(jobId: string): Promise<void> {
           <span class="state" :class="j.state">{{ STATE_TEXT[j.state] ?? j.state }}</span>
         </div>
         <div class="bar" v-if="j.state === 'queued' || j.state === 'running'"><div class="bar-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
-        <div class="foot" v-if="j.error || j.downgraded || (j.state === 'done' && j.outputPath) || j.state === 'failed'">
+        <div class="foot" v-if="j.error || j.downgraded || j.anonFallback || (j.state === 'done' && j.outputPath) || j.state === 'failed'">
           <span v-if="j.downgraded" class="downgrade">已降级为低品质</span>
+          <span v-if="j.anonFallback" class="anonfb" title="登录态直链被拒，自动改走匿名下载完成">已切匿名下载</span>
           <span v-if="j.error" class="error">{{ j.error }}</span>
           <button v-if="j.state === 'failed'" class="retry-btn" :disabled="retrying.has(j.id)" @click="retry(j.id)">
             {{ retrying.has(j.id) ? '重试中…' : '重试' }}
@@ -120,6 +121,7 @@ async function retry(jobId: string): Promise<void> {
 .bar-inner { height: 100%; background: #31c27c; transition: width 0.3s; }
 .foot { display: flex; gap: 10px; font-size: 12px; }
 .downgrade { color: #d9930e; }
+.anonfb { color: #5b8def; }
 .error { color: #d32f2f; word-break: break-all; }
 .foot { display: flex; align-items: center; gap: 10px; font-size: 12px; min-height: 22px; }
 .open-btn { margin-left: auto; border: 1px solid #d0d0d0; border-radius: 5px; background: #fff; font-size: 12px; padding: 2px 10px; cursor: pointer; }

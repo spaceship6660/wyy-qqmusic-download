@@ -18,14 +18,22 @@ function track(id: string, name = '同名', artist = '同歌手'): TrackDTO {
   return { id, name, artist, album: '专辑', cover: '', mediaMid: `MED${id}` }
 }
 
-/** 本地下载源：/gone* → 404，其余 → 200 + payload；可延迟响应以制造并发/碰撞窗口 */
-async function startServer(delayMs = 0) {
+/** 本地下载源：/gone* → 404，其余 → 200 + payload；可延迟响应以制造并发/碰撞窗口。
+ * failFirst[path]=n：该路径前 n 次请求回 403（模拟账户直链被 CDN 拒收），之后正常。 */
+async function startServer(delayMs = 0, failFirst: Record<string, number> = {}) {
   const recorded: string[] = []
+  const counts = new Map<string, number>()
   const server = http.createServer((req, res) => {
-    const p = req.url ?? ''
-    recorded.push(p)
+    const p = (req.url ?? '').split('?')[0]
+    recorded.push(req.url ?? '')
+    counts.set(p, (counts.get(p) ?? 0) + 1)
     if (p.startsWith('/gone')) {
       res.writeHead(404)
+      res.end()
+      return
+    }
+    if ((counts.get(p) ?? 0) <= (failFirst[p] ?? 0)) {
+      res.writeHead(403)
       res.end()
       return
     }
@@ -126,7 +134,7 @@ interface Env {
   dl: string      // 下载目录
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
-  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[] }
+  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined> }
   fetchMock: ReturnType<typeof vi.fn>
 }
 
@@ -139,21 +147,21 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number> } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
     path.join(dir, 'settings.json'),
     JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
-  const { server, port, recorded } = await startServer(opts.delayMs ?? 0)
+  const { server, port, recorded } = await startServer(opts.delayMs ?? 0, opts.failFirst ?? {})
   const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey })
-  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[] }
+  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined> }
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
     emitEvent: (ch, payload) => {
-      const p = payload as { outputPath?: string }
+      const p = payload as { outputPath?: string; anonFallback?: boolean }
       if (ch === 'dl:jobStart') {
         events.start++
         events.active++
@@ -163,6 +171,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
         events.done++
         events.active--
         if (p.outputPath) events.donePaths.push(p.outputPath)
+        events.doneAnon.push(p.anonFallback)
       }
       if (ch === 'dl:failed') {
         events.failed++
@@ -306,6 +315,35 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   it('R2: 未知 jobId 重试抛错（重启后记录清空需重新勾选）', async () => {
     const env = await makeEnv()
     expect(() => env.app.retryFailed('no-such-job')).toThrow(/重新勾选/)
+  })
+
+  it('R5: 网易云账户直链 403 → 自动改走匿名成功并标记 anonFallback', async () => {
+    // 本地源前 2 次 403（账户初下 + 重取直链再下），第 3 次（匿名）200
+    const env = await makeEnv({ failFirst: { '/ne.mp3': 2 } })
+    env.app.enqueue({
+      tracks: [{ id: '123', name: '匿名兜底歌', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(env.recorded).toEqual(['/ne.mp3', '/ne.mp3', '/ne.mp3'])
+    expect(env.events.doneAnon).toEqual([true])
+    const files = fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))
+    expect(files.length).toBe(1)
+  })
+
+  it('R6: 网易云持续 403 → 匿名也 403 才失败（账户 2 次 + 匿名 2 次）', async () => {
+    const env = await makeEnv({ failFirst: { '/ne.mp3': 99 } })
+    env.app.enqueue({
+      tracks: [{ id: '123', name: '全拒歌', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.events.done).toBe(0)
+    // 账户（初下 + 重取直链再下）+ 匿名（初下 + 重取直链再下）= 4 次
+    expect(env.recorded).toEqual(['/ne.mp3', '/ne.mp3', '/ne.mp3', '/ne.mp3'])
   })
 
   it('R4: 账户身份全档空 purl + 探活失败 → 报「登录已过期」，authStatus.sessionExpired=true', async () => {

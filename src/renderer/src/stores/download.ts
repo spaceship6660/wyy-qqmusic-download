@@ -9,7 +9,7 @@ export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
 
 export interface UiQueueJob {
   id: string; source: string; state: string; progress: number
-  name: string; artist: string; error?: string; downgraded?: boolean; outputPath?: string
+  name: string; artist: string; error?: string; downgraded?: boolean; anonFallback?: boolean; outputPath?: string
 }
 
 export const useDownloadStore = defineStore('download', {
@@ -58,7 +58,7 @@ export const useDownloadStore = defineStore('download', {
         id: job.id, source: job.source ?? 'qq', state: job.state,
         progress: job.progress ?? 0,
         name: job.track?.name ?? '', artist: job.track?.artist ?? '',
-        error: job.error, downgraded: job.downgraded, outputPath: job.outputPath,
+        error: job.error, downgraded: job.downgraded, anonFallback: job.anonFallback, outputPath: job.outputPath,
       }
       if (idx >= 0) this.queue[idx] = entry
       else this.queue.push(entry)
