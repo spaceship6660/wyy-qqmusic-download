@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { TrackDTO, Quality } from '../qqapi/tracks'
 
-export type JobState = 'queued' | 'running' | 'done' | 'failed'
+export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 
 export interface DownloadJob {
   id: string
@@ -15,18 +15,20 @@ export interface DownloadJob {
   outputPath?: string
   downgraded?: boolean      // 请求无损但实际降级（渲染器展示黄条）
   anonFallback?: boolean    // 账户直链被拒（CDN 403）后改走匿名成功的标记（渲染器展示灰条）
+  cancelRequested?: boolean // 取消标记（可序列化；AbortController 本体不放 job 上，防 IPC 结构化克隆炸）
 }
 
 export interface QueueDeps {
   concurrency: number
   rateLimiter: { wait(): Promise<void> }
-  runner: (job: DownloadJob, report: (pct: number) => void) => Promise<{ outputPath?: string } | void>
+  runner: (job: DownloadJob, report: (pct: number) => void, signal: AbortSignal) => Promise<{ outputPath?: string } | void>
 }
 
 export class DownloadQueue extends EventEmitter {
   private queue: DownloadJob[] = []
   private running = 0
   private idleResolvers: Array<() => void> = []
+  private inflight = new Map<string, { ctrl: AbortController; job: DownloadJob }>()
 
   constructor(private deps: QueueDeps) { super() }
 
@@ -61,17 +63,35 @@ export class DownloadQueue extends EventEmitter {
 
   private async runJob(job: DownloadJob): Promise<void> {
     let finished = false
+    const ctrl = new AbortController()
+    this.inflight.set(job.id, { ctrl, job })
+    const cancelled = (): boolean => job.cancelRequested === true || ctrl.signal.aborted
+    const finishCancelled = (): void => {
+      finished = true
+      job.state = 'cancelled'
+      job.error = undefined
+      this.emit('jobCancelled', job)
+    }
     try {
       job.state = 'running'
       this.emit('jobStart', job)
       await this.deps.rateLimiter.wait()
+      if (cancelled()) {
+        finishCancelled()
+        return
+      }
       const { outputPath } = (await this.deps.runner(job, (pct) => {
         if (finished) return
         if (pct !== job.progress) {
           job.progress = pct
           this.emit('jobProgress', job)
         }
-      })) ?? {}
+      }, ctrl.signal)) ?? {}
+      if (cancelled()) {
+        // 取消恰好在收尾前到达：按取消算（产物若已落盘保留，不删用户文件）
+        finishCancelled()
+        return
+      }
       finished = true
       job.state = 'done'
       job.progress = 100
@@ -79,10 +99,35 @@ export class DownloadQueue extends EventEmitter {
       this.emit('jobDone', job)
     } catch (err) {
       finished = true
-      job.state = 'failed'
-      job.error = err instanceof Error ? err.message : String(err)
-      this.emit('jobFailed', job)
+      if (cancelled() || (err instanceof Error && err.name === 'AbortError')) {
+        finishCancelled()
+      } else {
+        job.state = 'failed'
+        job.error = err instanceof Error ? err.message : String(err)
+        this.emit('jobFailed', job)
+      }
+    } finally {
+      this.inflight.delete(job.id)
     }
+  }
+
+  /** 取消任务：排队中直接移除；下载中中止传输。幂等：找不到（已完成/已取消/不存在）返回 false。 */
+  cancel(id: string): boolean {
+    const idx = this.queue.findIndex((j) => j.id === id)
+    if (idx >= 0) {
+      const [j] = this.queue.splice(idx, 1)
+      j.state = 'cancelled'
+      j.error = undefined
+      this.emit('jobCancelled', j)
+      return true
+    }
+    const inf = this.inflight.get(id)
+    if (inf) {
+      inf.job.cancelRequested = true
+      inf.ctrl.abort()
+      return true
+    }
+    return false
   }
 
   waitIdle(ms: number): Promise<void> {

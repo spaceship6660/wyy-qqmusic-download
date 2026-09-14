@@ -79,6 +79,49 @@ describe('DownloadQueue', () => {
     expect(seen.sort()).toEqual(['netease', 'qq'])
   })
 
+  it('取消排队中的任务：移除并广播 cancelled，不执行；重复取消返回 false', async () => {
+    const started: string[] = []
+    const q = new DownloadQueue({
+      concurrency: 1,
+      rateLimiter: { wait: async () => {} } as any,
+      runner: async (j) => {
+        started.push(j.id)
+        await new Promise((r) => setTimeout(r, 5))
+      },
+    })
+    const cancelled: string[] = []
+    q.on('jobCancelled', (j: DownloadJob) => cancelled.push(`${j.id}:${j.state}`))
+    q.enqueue([job('a'), job('b'), job('c')])
+    expect(q.cancel('b')).toBe(true)
+    await q.waitIdle(3000)
+    expect(started).toEqual(['a', 'c'])
+    expect(cancelled).toEqual(['b:cancelled'])
+    expect(q.cancel('b')).toBe(false)
+    expect(q.cancel('zzz')).toBe(false)
+  })
+
+  it('取消下载中的任务：中止 runner 并广播 cancelled（不判失败）', async () => {
+    const failed: string[] = []
+    const q = new DownloadQueue({
+      concurrency: 1,
+      rateLimiter: { wait: async () => {} } as any,
+      runner: async (_j, _report, signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('boom')))
+        })
+      },
+    })
+    const states: string[] = []
+    q.on('jobCancelled', (j: DownloadJob) => states.push(`${j.id}:${j.state}`))
+    q.on('jobFailed', (j: DownloadJob) => failed.push(j.id))
+    q.enqueue([job('a')])
+    await new Promise((r) => setTimeout(r, 20)) // 等 runner 跑起来
+    expect(q.cancel('a')).toBe(true)
+    await q.waitIdle(3000)
+    expect(states).toEqual(['a:cancelled'])
+    expect(failed).toEqual([])
+  })
+
   it('入队即广播 jobQueued：并发已满时排队中的任务也能被渲染侧看到', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => { release = r })

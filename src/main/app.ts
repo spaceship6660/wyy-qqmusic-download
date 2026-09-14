@@ -91,6 +91,7 @@ export function createApp(deps: AppDeps) {
       fetchDetail: () => Promise<{ date: string }>
       fetchLyrics: () => Promise<string>
     },
+    signal?: AbortSignal,
   ): Promise<{ outputPath: string }> {
     // 1) 直链（约 20 分钟过期；下载失败重取一次）
     const first = await spec.resolveOnce(job.quality)
@@ -113,13 +114,16 @@ export function createApp(deps: AppDeps) {
     }
     const doDownload = (url: string, destPath: string) => downloadFile(url, destPath, {
       retries: 2,
+      signal,
       onProgress: (got, total) => {
         report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
       },
     })
     try {
       await doDownload(first.url, dest)
-    } catch {
+    } catch (e) {
+      // 取消不重试：直接抛给队列标 cancelled（否则 abort 会被当成普通失败再重取直链）
+      if (signal?.aborted) throw e
       // catch-all 重取直链重下（标签步骤在块外，无掩盖调用方错误的风险）；
       // 失败清理占位文件，避免 .part 并发碰撞后的废文件堆积
       fs.rmSync(dest, { force: true })
@@ -183,9 +187,9 @@ export function createApp(deps: AppDeps) {
   const queue = new DownloadQueue({
     concurrency: settings.concurrency,
     rateLimiter: new RateLimiter(1000),
-    runner: async (job, report) => {
+    runner: async (job, report, signal) => {
       // 按 source 选 wrapper：一个参数化点集合 = 一条管线（QQ / 网易云）
-      if (job.source === 'netease') return runNeteaseJob(job, report)
+      if (job.source === 'netease') return runNeteaseJob(job, report, signal)
       // 下载身份：匿名时直链/详情/歌词全走无凭证 client（歌单浏览不受影响，仍用登录态）
       const qc = settings.qqIdentity === 'anon' ? anonQqClient : client
       try {
@@ -194,7 +198,7 @@ export function createApp(deps: AppDeps) {
           extFor: (q) => QUALITY_MAP[q].ext,
           fetchDetail: () => getTrackDetail(qc, job.track.id),
           fetchLyrics: () => fetchLyric(qc, job.track.id),
-        })
+        }, signal)
         if (qc === client && settings.qqIdentity === 'account') qqSessionExpired = false
         return r
       } catch (e) {
@@ -218,12 +222,13 @@ export function createApp(deps: AppDeps) {
   queue.on('jobProgress', (j) => emitEvent('dl:progress', { ...j }))
   queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))
   queue.on('jobFailed', (j) => emitEvent('dl:failed', { ...j }))
+  queue.on('jobCancelled', (j) => emitEvent('dl:cancelled', { ...j }))
 
   // 网易云 wrapper：ID 校验（netease 接口以数值 id 查询，非数值直接失败，不进下载），
   // 其余差异仅三个参数化点（直链 br 逐档降级 / 扩展名 / 元数据），复用共享骨架。
   // 账户 403 兜底：登录态拿到的直链若被 CDN 拒收（个别账号会被限制下载，匿名反而正常），
   // 自动改走匿名重下一遍并标记 anonFallback（只追加一次尝试，不循环）。
-  const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void): Promise<{ outputPath?: string } | void> => {
+  const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void, signal?: AbortSignal): Promise<{ outputPath?: string } | void> => {
     const id = Number(job.track.id)
     if (!Number.isFinite(id)) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
     const runWith = (nc: NeClient) => runDownloadJob(job, report, {
@@ -231,7 +236,7 @@ export function createApp(deps: AppDeps) {
       extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
       fetchDetail: () => neGetTrackDetail(nc, id),
       fetchLyrics: () => neFetchLyric(nc, id),
-    })
+    }, signal)
     if (settings.neIdentity === 'anon') return runWith(anonNeClient)
     try {
       return await runWith(neClient)
@@ -370,7 +375,7 @@ export function createApp(deps: AppDeps) {
       queue.enqueue(jobs)
       return true
     },
-    /** 失败重试：按登记的原参数重新入队（同 id，渲染侧原地更新状态） */
+    /** 失败重试：按登记的原参数重新入队（同 id，渲染侧移到队尾） */
     retryFailed: (jobId: string) => {
       const spec = jobSpecs.get(jobId)
       if (!spec) throw new Error('找不到该任务记录（应用重启后记录清空），请重新勾选下载')
@@ -385,6 +390,8 @@ export function createApp(deps: AppDeps) {
       }])
       return true
     },
+    /** 取消下载：排队中直接移除，下载中中止传输；找不到（已完成/已取消/不存在）返回 false */
+    cancelDownload: (jobId: string) => queue.cancel(jobId),
     settingsGet: () => settings,
     settingsSet: (patch: Partial<Settings>) => {
       settings = { ...settings, ...patch, concurrency: Math.max(1, patch.concurrency ?? settings.concurrency) }

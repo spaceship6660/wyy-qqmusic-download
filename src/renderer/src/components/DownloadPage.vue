@@ -26,6 +26,7 @@ const STATE_TEXT: Record<string, string> = {
   running: '下载中',
   done: '已完成',
   failed: '失败',
+  cancelled: '已取消',
 }
 const SOURCE_TEXT: Record<string, string> = { qq: 'QQ', netease: '网易云' }
 
@@ -48,6 +49,15 @@ async function retry(jobId: string): Promise<void> {
     window.alert(e instanceof Error ? e.message : String(e))
   } finally {
     retrying.value.delete(jobId)
+  }
+}
+
+/** 取消下载：排队中直接移除，下载中中止传输（幂等，已结束的忽略） */
+async function cancel(jobId: string): Promise<void> {
+  try {
+    await api.invoke('dl:cancel', { jobId })
+  } catch {
+    // 通道异常才到这里（找不到任务返回 false 不抛错），忽略
   }
 }
 </script>
@@ -73,6 +83,12 @@ async function retry(jobId: string): Promise<void> {
           <span class="song-name" :title="j.name">{{ j.name }}</span>
           <span class="artist" v-if="j.artist">- {{ j.artist }}</span>
           <span class="state" :class="j.state">{{ STATE_TEXT[j.state] ?? j.state }}</span>
+          <button
+            v-if="j.state === 'queued' || j.state === 'running'"
+            class="cancel-btn"
+            title="取消下载"
+            @click="cancel(j.id)"
+          >取消</button>
         </div>
         <div class="bar" v-if="j.state === 'queued' || j.state === 'running'"><div class="bar-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
         <div class="foot" v-if="j.error || j.downgraded || j.anonFallback || (j.state === 'done' && j.outputPath) || j.state === 'failed'">
@@ -117,6 +133,19 @@ async function retry(jobId: string): Promise<void> {
 .state { margin-left: auto; font-size: 12px; color: #666; flex-shrink: 0; }
 .state.running { color: #31c27c; }
 .state.failed { color: #d33; }
+.state.cancelled { color: #999; }
+.row.cancelled { border-left: 3px solid #ccc; opacity: 0.75; }
+.cancel-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #999;
+  background: #fff;
+  border: 1px solid #d0d0d0;
+  border-radius: 5px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.cancel-btn:hover { color: #d32f2f; border-color: #d32f2f; }
 .bar { height: 5px; background: #eef0f2; border-radius: 3px; margin: 8px 0 4px; overflow: hidden; }
 .bar-inner { height: 100%; background: #31c27c; transition: width 0.3s; }
 .foot { display: flex; gap: 10px; font-size: 12px; }

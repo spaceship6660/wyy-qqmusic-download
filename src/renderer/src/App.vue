@@ -781,6 +781,7 @@ onMounted(() => {
   api.on('dl:jobStart', store.onQueueEvent)
   api.on('dl:progress', store.onQueueEvent)
   api.on('dl:done', store.onQueueEvent)
+  api.on('dl:cancelled', store.onQueueEvent)
   api.on('dl:failed', (job: any) => {
     store.onQueueEvent(job)
     // QQ 账户下载失败可能被主进程判定为登录过期：刷新 auth:status 让左下显示“重新登录”
@@ -827,6 +828,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         :collapsed="dlCardCollapsed"
         @toggle="dlCardCollapsed = !dlCardCollapsed"
         @open="goTab('download')"
+        @cancel="(id: string) => api.invoke('dl:cancel', { jobId: id })"
       />
       <div class="sidebar-foot">
         <LoginButton

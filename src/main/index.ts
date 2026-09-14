@@ -123,6 +123,7 @@ safeHandle('ne:playlistPage', (params: { id: string; offset: number; limit?: num
 safeHandle('qq:linkTracks', (url: string) => appInstance.fetchTracksByLink(url))
 safeHandle('dl:enqueue', (payload: unknown) => appInstance.enqueue(payload as any))
 safeHandle('dl:retry', (payload: { jobId: string }) => appInstance.retryFailed((payload as any)?.jobId))
+safeHandle('dl:cancel', (payload: { jobId: string }) => appInstance.cancelDownload((payload as any)?.jobId))
 safeHandle('settings:get', () => appInstance.settingsGet())
 safeHandle('settings:set', (patch: unknown) => appInstance.settingsSet(patch as any))
 safeHandle('auth:startQr', () => appInstance.authStartQr())

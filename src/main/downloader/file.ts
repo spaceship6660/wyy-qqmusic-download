@@ -33,6 +33,11 @@ export async function downloadFile(
   //（uniquePath 是 check-then-write，并发同名任务可能撞同一个 .part —— T10 编排时按 track.id 去重/预留）
   let lastErr: unknown
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // 取消短路：abort 后不再睡退避、不再发请求，直接抛给队列标 cancelled
+    if (opts.signal?.aborted) {
+      const reason = (opts.signal as { reason?: unknown }).reason
+      throw reason instanceof Error ? reason : new Error('已取消')
+    }
     if (attempt > 0) await sleep(1000 * 2 ** (attempt - 1))
     try {
       const signal = opts.signal

@@ -4,7 +4,7 @@ import type { UiQueueJob } from '../stores/download'
 // 侧栏下载卡：挂在左侧导航下方空白区（不再悬浮挡内容）。
 // 有排队/进行中任务时常驻；可收起成一条细栏（下载不中断），点标题进我的下载。
 defineProps<{ jobs: UiQueueJob[]; collapsed: boolean }>()
-const emit = defineEmits<{ toggle: []; open: [] }>()
+const emit = defineEmits<{ toggle: []; open: []; cancel: [id: string] }>()
 
 function stateText(j: UiQueueJob): string {
   if (j.state === 'queued') return '排队中'
@@ -34,6 +34,7 @@ function stateText(j: UiQueueJob): string {
           <div class="side-dl-sub">
             <div class="side-dl-bar"><div class="side-dl-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
             <span class="side-dl-pct">{{ stateText(j) }}</span>
+            <button class="side-dl-x" title="取消下载" @click="emit('cancel', j.id)">✕</button>
           </div>
         </div>
       </div>
@@ -112,4 +113,18 @@ function stateText(j: UiQueueJob): string {
 .side-dl-bar { flex: 1; min-width: 0; height: 5px; background: #eef0f2; border-radius: 3px; overflow: hidden; }
 .side-dl-inner { height: 100%; background: #31c27c; transition: width 0.3s; }
 .side-dl-pct { flex-shrink: 0; color: #999; font-size: 11px; }
+.side-dl-x {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: #bbb;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.side-dl-x:hover { color: #d32f2f; background: #fdecea; }
 </style>
