@@ -25,13 +25,31 @@ describe('download store', () => {
     s.setQuality('flac')
     expect(s.quality).toBe('flac')
   })
-
   it('队列事件镜像：jobStart/progress/done/failed 更新 queue 列表', () => {
     const s = useDownloadStore()
     s.onQueueEvent({ id: 'j1', source: 'qq', state: 'running', progress: 10 } as any)
     expect(s.queue[0].state).toBe('running')
     s.onQueueEvent({ id: 'j1', source: 'qq', state: 'done', progress: 100, outputPath: '/x.mp3' } as any)
     expect(s.queue[0].state).toBe('done')
+  })
+
+  it('重排队移到队尾：failed → queued 不再原地更新（显示顺序=实际执行顺序）', () => {
+    const s = useDownloadStore()
+    const ev = (id: string, state: string) => ({ id, source: 'netease', state, progress: 0, track: { name: id } }) as any
+    s.onQueueEvent(ev('a4', 'queued'))
+    s.onQueueEvent(ev('a2', 'queued'))
+    s.onQueueEvent({ ...ev('a4', 'running'), progress: 10 })
+    s.onQueueEvent({ ...ev('a4', 'failed'), error: 'HTTP 403' })
+    expect(s.queue.map((j) => j.id)).toEqual(['a4', 'a2'])
+    // 重试：主进程把 a4 追加到队尾 → 渲染侧同样移到队尾
+    s.onQueueEvent(ev('a4', 'queued'))
+    expect(s.queue.map((j) => j.id)).toEqual(['a2', 'a4'])
+    expect(s.queue[1].state).toBe('queued')
+    expect(s.queue[1].error).toBeUndefined() // 新快照覆盖旧错误
+    // 进行中更新仍原地（不跳动）
+    s.onQueueEvent({ ...ev('a4', 'running'), progress: 50 })
+    expect(s.queue.map((j) => j.id)).toEqual(['a2', 'a4'])
+    expect(s.queue[1].progress).toBe(50)
   })
 
   it('netease source 的队列事件镜像', () => {

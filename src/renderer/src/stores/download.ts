@@ -51,7 +51,9 @@ export const useDownloadStore = defineStore('download', {
     setLyricMode(m: UiLyricMode) { this.lyricMode = m },
     setLogin(ok: boolean, uin: string) { this.loggedIn = ok; this.uin = uin },
     setNeLogin(ok: boolean) { this.neLoggedIn = ok },
-    /** 队列事件镜像：主进程推来的 job 快照 → queue 列表（upsert by id） */
+    /** 队列事件镜像：主进程推来的 job 快照 → queue 列表（upsert by id）。
+     * 顺序即主进程队列顺序：重排队（重试）的任务在主进程是追加到队尾的，
+     * 故 failed/done → queued 时移到队尾，而不是原地更新（否则显示顺序与实际执行顺序相反）。 */
     onQueueEvent(job: any) {
       const idx = this.queue.findIndex((q) => q.id === job.id)
       const entry: UiQueueJob = {
@@ -60,8 +62,16 @@ export const useDownloadStore = defineStore('download', {
         name: job.track?.name ?? '', artist: job.track?.artist ?? '',
         error: job.error, downgraded: job.downgraded, anonFallback: job.anonFallback, outputPath: job.outputPath,
       }
-      if (idx >= 0) this.queue[idx] = entry
-      else this.queue.push(entry)
+      if (idx < 0) {
+        this.queue.push(entry)
+        return
+      }
+      if (job.state === 'queued' && this.queue[idx].state !== 'queued') {
+        this.queue.splice(idx, 1)
+        this.queue.push(entry)
+        return
+      }
+      this.queue[idx] = entry
     },
     /** 清除已完成/失败的历史记录（进行中与排队中的保留） */
     clearDone() {
