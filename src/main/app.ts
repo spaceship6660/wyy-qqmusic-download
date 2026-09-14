@@ -228,24 +228,41 @@ export function createApp(deps: AppDeps) {
   // 其余差异仅三个参数化点（直链 br 逐档降级 / 扩展名 / 元数据），复用共享骨架。
   // 账户 403 兜底：登录态拿到的直链若被 CDN 拒收（个别账号会被限制下载，匿名反而正常），
   // 自动改走匿名重下一遍并标记 anonFallback（只追加一次尝试，不循环）。
+  // 会员提示：付费/会员歌曲拿不到直链时，报错点名为身份问题而非通用文案（有会员登录态能下则不受影响）。
   const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void, signal?: AbortSignal): Promise<{ outputPath?: string } | void> => {
     const id = Number(job.track.id)
     if (!Number.isFinite(id)) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
+    const vipify = (e: unknown): unknown => {
+      if (job.track.vip && e instanceof Error && /未拿到可播放/.test(e.message)) {
+        return new Error('付费/会员歌曲下载不了：当前账号无该曲权限（需网易云会员或单独购买）')
+      }
+      return e
+    }
     const runWith = (nc: NeClient) => runDownloadJob(job, report, {
       resolveOnce: (q) => neGetAudioUrl(nc, id, q, dbgFile),
       extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
       fetchDetail: () => neGetTrackDetail(nc, id),
       fetchLyrics: () => neFetchLyric(nc, id),
     }, signal)
-    if (settings.neIdentity === 'anon') return runWith(anonNeClient)
+    if (settings.neIdentity === 'anon') {
+      try {
+        return await runWith(anonNeClient)
+      } catch (e) {
+        throw vipify(e)
+      }
+    }
     try {
       return await runWith(neClient)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      if (!/HTTP 403/.test(msg)) throw e
+      if (!/HTTP 403/.test(msg)) throw vipify(e)
       dbgFile?.(`ne 下载 ${id}：账户直链 403，改走匿名重试一次`)
       job.anonFallback = true
-      return runWith(anonNeClient)
+      try {
+        return await runWith(anonNeClient)
+      } catch (e2) {
+        throw vipify(e2)
+      }
     }
   }
 

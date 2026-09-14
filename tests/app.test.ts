@@ -56,7 +56,7 @@ async function startServer(delayMs = 0, failFirst: Record<string, number> = {}) 
  *   （postMusicu 路径缺失 → QqApiError）。
  * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
  */
-function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean }) {
+function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean; neDeadUrl?: boolean }) {
   let vkeyCalls = 0
   const mock = vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
@@ -67,10 +67,12 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
       )
     }
     if (url.includes('/api/song/enhance/player/url')) {
-      // 网易云直链：本地 server 的 /ne.mp3（320 档直接命中，不触发降级）
+      // 网易云直链：本地 server 的 /ne.mp3（320 档直接命中，不触发降级）；
+      // neDeadUrl 时回空 url（模拟会员/无版权拿不到直链）
+      const dead = opts.neDeadUrl
       return new Response(JSON.stringify({
         code: 200,
-        data: [{ id: 123, url: `http://127.0.0.1:${opts.port}/ne.mp3`, br: 320000, code: 200 }],
+        data: [{ id: 123, url: dead ? null : `http://127.0.0.1:${opts.port}/ne.mp3`, br: 320000, code: 200 }],
       }), { status: 200 })
     }
     if (url.includes('/api/song/lyric')) {
@@ -134,7 +136,7 @@ interface Env {
   dl: string      // 下载目录
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
-  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined> }
+  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; failedErrors: string[] }
   fetchMock: ReturnType<typeof vi.fn>
 }
 
@@ -147,7 +149,7 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number> } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
@@ -155,13 +157,13 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
     JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0, opts.failFirst ?? {})
-  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey })
-  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined> }
+  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey, neDeadUrl: opts.neDeadUrl })
+  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, failedErrors: [] as string[] }
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
     emitEvent: (ch, payload) => {
-      const p = payload as { outputPath?: string; anonFallback?: boolean }
+      const p = payload as { outputPath?: string; anonFallback?: boolean; error?: string }
       if (ch === 'dl:jobStart') {
         events.start++
         events.active++
@@ -176,6 +178,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
       if (ch === 'dl:failed') {
         events.failed++
         events.active--
+        if (p.error) events.failedErrors.push(p.error)
       }
     },
   })
@@ -344,6 +347,22 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.done).toBe(0)
     // 账户（初下 + 重取直链再下）+ 匿名（初下 + 重取直链再下）= 4 次
     expect(env.recorded).toEqual(['/ne.mp3', '/ne.mp3', '/ne.mp3', '/ne.mp3'])
+  })
+
+  it('R7: 会员歌曲无直链 → 点名会员/付费（而非通用文案）；普通歌仍走通用文案', async () => {
+    const env = await makeEnv({ neDeadUrl: true })
+    env.app.enqueue({
+      tracks: [
+        { id: '201', name: '会员歌', artist: '手', album: '', cover: '', vip: true },
+        { id: '202', name: '普通歌', artist: '手', album: '', cover: '' },
+      ],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 2)
+    expect(env.events.failedErrors.length).toBe(2)
+    expect(env.events.failedErrors.some((m) => /会员|付费/.test(m))).toBe(true)
+    expect(env.events.failedErrors.some((m) => /会员|付费/.test(m) === false && /未拿到可播放/.test(m))).toBe(true)
   })
 
   it('R4: 账户身份全档空 purl + 探活失败 → 报「登录已过期」，authStatus.sessionExpired=true', async () => {
