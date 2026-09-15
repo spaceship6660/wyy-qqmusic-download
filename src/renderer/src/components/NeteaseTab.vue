@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
@@ -10,7 +10,9 @@ import { api } from '../api'
 // 歌单浏览（我喜欢的/自建/收藏）已由左侧导航承担（App.vue 统一管理）；
 // 搜索/专辑结果内联展示在本页（歌曲/专辑 tab 常驻，不再跳走），下载走窗口底部工具栏。
 const store = useDownloadStore()
-const loggedIn = ref(false)
+// 登录态以 store 为单一事实源（侧栏退出/开窗扫码都能同步到本页；此前用本地 ref 会与侧栏脱节）
+const emit = defineEmits<{ changed: [] }>()
+const loggedIn = computed(() => store.neLoggedIn)
 const nickname = ref('')
 const q = ref('')
 const error = ref('')
@@ -39,10 +41,13 @@ const openedAlbum = ref('')
 
 async function refreshAuth(): Promise<void> {
   const s: any = await api.invoke('ne:auth:status')
-  loggedIn.value = !!s?.loggedIn
-  if (loggedIn.value) {
+  const ok = !!s?.loggedIn
+  store.setNeLogin(ok)
+  if (ok) {
     const acc: any = await api.invoke('ne:account')
-    if (acc) nickname.value = acc.nickname ?? ''
+    nickname.value = acc?.nickname ?? ''
+  } else {
+    nickname.value = ''
   }
 }
 
@@ -128,9 +133,9 @@ async function openLogin(): Promise<void> {
 /** 退出登录：清本机网易云凭证，通知 App 收起歌单导航 */
 async function logout(): Promise<void> {
   await api.invoke('ne:auth:clear')
-  loggedIn.value = false
   nickname.value = ''
-  window.dispatchEvent(new CustomEvent('ne:authChanged'))
+  store.setNeLogin(false)
+  emit('changed') // 通知 App 收起歌单导航并清缓存
 }
 
 async function doImportCookie(): Promise<void> {
@@ -138,16 +143,22 @@ async function doImportCookie(): Promise<void> {
   const ok: boolean = await api.invoke('ne:auth:importCookie', cookieText.value)
   if (ok) {
     showImport.value = false
-    void refreshAuth()
-    window.dispatchEvent(new CustomEvent('ne:authChanged')) // 触发 App 刷新歌单
+    await refreshAuth()
+    emit('changed') // 触发 App 刷新歌单
   } else {
     error.value = 'Cookie 无效（需含 MUSIC_U）'
   }
 }
 
+let offAuthChanged: (() => void) | null = null
 onMounted(() => {
   void refreshAuth()
-  api.on('ne:authChanged', () => void refreshAuth())
+  offAuthChanged = api.on('ne:authChanged', () => void refreshAuth())
+})
+// 组件随 tab 切换反复挂载：必须移除监听，否则回调累积（重复刷新/请求）
+onUnmounted(() => {
+  if (offAuthChanged) offAuthChanged()
+  offAuthChanged = null
 })
 </script>
 

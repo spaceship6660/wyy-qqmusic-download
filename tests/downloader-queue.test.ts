@@ -122,6 +122,46 @@ describe('DownloadQueue', () => {
     expect(failed).toEqual([])
   })
 
+  it('setConcurrency 调高后立即补调度排队任务（无需等运行中任务结束）', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const started: string[] = []
+    const q = new DownloadQueue({
+      concurrency: 1,
+      rateLimiter: { wait: async () => {} } as any,
+      runner: async (j) => {
+        started.push(j.id)
+        if (j.id === 'a') await gate
+      },
+    })
+    q.enqueue([job('a'), job('b')])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(started).toEqual(['a']) // 并发 1：b 还在排队
+    q.setConcurrency(2)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(started).toEqual(['a', 'b']) // 立即补调度，无需等 a 结束
+    release()
+    await q.waitIdle(3000)
+  })
+
+  it('has：排队/下载中为 true，完成后 false（供重试去重）', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const q = new DownloadQueue({
+      concurrency: 1,
+      rateLimiter: { wait: async () => {} } as any,
+      runner: async () => { await gate },
+    })
+    q.enqueue([job('a'), job('b')])
+    expect(q.has('a')).toBe(true) // 下载中
+    expect(q.has('b')).toBe(true) // 排队中
+    expect(q.has('z')).toBe(false)
+    release()
+    await q.waitIdle(3000)
+    expect(q.has('a')).toBe(false)
+    expect(q.has('b')).toBe(false)
+  })
+
   it('入队即广播 jobQueued：并发已满时排队中的任务也能被渲染侧看到', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => { release = r })

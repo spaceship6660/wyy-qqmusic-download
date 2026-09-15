@@ -71,6 +71,14 @@ describe('getDissTracksPage 分页诊断', () => {
     const short = await getDissTracksPage(mockClient({ songlist: [song('m1')] }), { dirid: 201, songBegin: 200 })
     expect(short?.more).toBe(false)
   })
+  it('total=0 视为缺失（不可信）→ 按原始条数兜底判定，不提前停止翻页', async () => {
+    const full = await getDissTracksPage(
+      mockClient({ songlist: Array.from({ length: 200 }, (_, i) => song(`m${i}`)), total: 0 }),
+      { dirid: 201, songBegin: 0 },
+    )
+    expect(full?.more).toBe(true)
+    expect(full?.totalSource).toBe('fallback')
+  })
   it('总数候选字段：total_song_num 可用；过滤掉无 mid 条目但游标按原始推进', async () => {
     const list = Array.from({ length: 200 }, (_, i) => (i === 5 ? { name: '坏条目' } : song(`m${i}`)))
     const page = await getDissTracksPage(mockClient({ songlist: list, total_song_num: 1500 }), { dirid: 201, songBegin: 0 })

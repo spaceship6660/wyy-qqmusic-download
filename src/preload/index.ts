@@ -15,13 +15,34 @@ function clean(v: unknown): unknown {
   }
 }
 
+// 通道白名单：window.api 是渲染侧唯一的特权面，泛化 invoke 会让任何渲染脚本
+// 触达任意主进程 handler（settings:set 任意目录、unlock:run 任意文件等）。只放行已知通道。
+const HANDLER_CHANNELS = new Set<string>([
+  'qq:search', 'qq:userPlaylists', 'qq:favPlaylists', 'qq:dissTracks',
+  'qq:albumSearch', 'qq:albumSongs', 'qq:linkTracks',
+  'ne:search', 'ne:albumSearch', 'ne:albumSongs', 'ne:playlistPage',
+  'ne:account', 'ne:playlists', 'ne:playlist',
+  'ne:auth:importCookie', 'ne:auth:status', 'ne:auth:clear', 'ne:auth:open',
+  'dl:enqueue', 'dl:retry', 'dl:cancel',
+  'settings:get', 'settings:set',
+  'auth:startQr', 'auth:poll', 'auth:waitResult', 'auth:importCookie', 'auth:clear', 'auth:status',
+  'fs:openDir', 'unlock:run',
+])
+const EVENT_CHANNELS = new Set<string>([
+  'dl:queued', 'dl:jobStart', 'dl:progress', 'dl:done', 'dl:failed', 'dl:cancelled', 'ne:authChanged',
+])
+
 const api = {
   invoke: async (channel: string, ...args: unknown[]): Promise<any> => {
+    if (!HANDLER_CHANNELS.has(channel)) throw new Error(`未授权的 IPC 通道: ${channel}`)
     const res = await ipcRenderer.invoke(channel, ...args.map((a) => clean(a)))
     return clean(res)
   },
-  on: (channel: string, cb: (payload: any) => void): void => {
-    ipcRenderer.on(channel, (_e, payload) => cb(clean(payload)))
+  on: (channel: string, cb: (payload: any) => void): (() => void) => {
+    if (!EVENT_CHANNELS.has(channel)) throw new Error(`未授权的事件通道: ${channel}`)
+    const handler = (_e: unknown, payload: unknown): void => cb(clean(payload))
+    ipcRenderer.on(channel, handler as any)
+    return () => ipcRenderer.removeListener(channel, handler as any)
   },
   /** Electron 36+：目录选择器的 File 只能经 webUtils.getPathForFile 取绝对路径 */
   getPathForFile: (f: any): string => webUtils.getPathForFile(f),

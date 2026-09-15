@@ -48,7 +48,20 @@ async function refreshStatus(): Promise<void> {
   emit('changed', { loggedIn: !!s?.loggedIn, uin: s?.uin ?? '', hasEncUin: !!s?.hasEncUin, loginMethod: s?.loginMethod ?? '', sessionExpired: !!s?.sessionExpired })
 }
 
+/** 轮询重入保护：单次 ptqrlogin 慢于 1s 时，interval 可能叠加并发轮询——并发的成功/失效响应
+ * 会让状态机错乱（success 后被并发的 65 置 failed）。同一时刻只允许一个在途。 */
+let pollBusy = false
 async function onPoll(): Promise<void> {
+  if (pollBusy) return
+  pollBusy = true
+  try {
+    await onPollInner()
+  } finally {
+    pollBusy = false
+  }
+}
+
+async function onPollInner(): Promise<void> {
   const my = session
   if (my !== session) return
   let status: string
@@ -58,6 +71,8 @@ async function onPoll(): Promise<void> {
     if (my !== session) return
     stopPolling()
     qrError.value = e instanceof Error ? e.message : String(e)
+    qrDataUrl.value = '' // 轮询已停：不能再显示一个不会更新的二维码
+    qrPhase.value = 'idle'
     return
   }
   if (my !== session) return
@@ -81,12 +96,14 @@ async function onPoll(): Promise<void> {
           closeQr()
         } else {
           qrError.value = res?.reason ?? '登录失败'
-          qrPhase.value = 'waiting'
+          qrDataUrl.value = '' // 主进程会话已 failed：不再展示无法续期的二维码
+          qrPhase.value = 'idle'
         }
       } catch (e) {
         if (my !== session) return
         qrError.value = e instanceof Error ? e.message : String(e)
-        qrPhase.value = 'waiting'
+        qrDataUrl.value = ''
+        qrPhase.value = 'idle'
       }
       session++
       break

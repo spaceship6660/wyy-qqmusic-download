@@ -116,16 +116,27 @@ export async function getTrackDetail(client: QqClient, mid: string): Promise<Tra
   }
 }
 
-const SONG_RE = /y\.qq\.com\/n\/ryqq\/songDetail\/([0-9A-Za-z]+)/
-const PL_RE = /y\.qq\.com\/n\/ryqq\/playlist\/(\d+)/
-const AL_RE = /y\.qq\.com\/n\/ryqq\/albumDetail\/([0-9A-Za-z]+)/
+// 用 URL 解析校验 hostname，而非在整串文本里 find：避免 `evily.qq.com` 或
+// `https://evil.example/?u=https://y.qq.com/n/ryqq/songDetail/...` 之类被误判为 QQ 链接
+const SONG_PATH_RE = /^\/n\/ryqq\/songDetail\/([0-9A-Za-z]+)/
+const PL_PATH_RE = /^\/n\/ryqq\/playlist\/(\d+)/
+const AL_PATH_RE = /^\/n\/ryqq\/albumDetail\/([0-9A-Za-z]+)/
 
 export function parseLink(url: string): LinkKind | null {
-  const s = url.match(SONG_RE)
+  const raw = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    return null
+  }
+  // 精确域或子域（c./i.y.qq.com）；`evily.qq.com` 不匹配 `.y.qq.com` 后缀
+  if (u.hostname !== 'y.qq.com' && !u.hostname.endsWith('.y.qq.com')) return null
+  const s = u.pathname.match(SONG_PATH_RE)
   if (s) return { kind: 'song', id: s[1] }
-  const p = url.match(PL_RE)
+  const p = u.pathname.match(PL_PATH_RE)
   if (p) return { kind: 'playlist', id: p[1] }
-  const a = url.match(AL_RE)
+  const a = u.pathname.match(AL_PATH_RE)
   if (a) return { kind: 'album', id: a[1] }
   return null
 }
@@ -155,7 +166,8 @@ export async function getSingleTrack(client: QqClient, mid: string): Promise<Tra
 
 /** 去掉 JSONP 包裹（形如 MusicJsonCallback({...}) 或 callback({...})） */
 export function stripJsonp(text: string): string {
-  const m = text.match(/^[\w$.]+\((.*)\)\s*;?\s*$/)
+  // [\s\S]：JSONP 回调体可能跨行（`.` 不匹配换行），否则无法剥离导致 JSON.parse 抛错
+  const m = text.match(/^[\w$.]+\(([\s\S]*)\)\s*;?\s*$/)
   return m ? m[1] : text
 }
 

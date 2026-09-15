@@ -40,15 +40,30 @@ onMounted(async () => {
   loaded.value = true
 })
 onUnmounted(() => {
-  if (dirTimer) clearTimeout(dirTimer)
-  if (decryptDirTimer) clearTimeout(decryptDirTimer)
-  if (saveTimer) clearTimeout(saveTimer)
+  // 卸载时把未落地的防抖写入立即 flush：否则改了目录/设置后马上切页，改动会静默丢失
+  if (dirTimer) { clearTimeout(dirTimer); dirTimer = null; void api.invoke('settings:set', { downloadDir: settings.value.downloadDir }) }
+  if (decryptDirTimer) { clearTimeout(decryptDirTimer); decryptDirTimer = null; void api.invoke('settings:set', { decryptOutDir: settings.value.decryptOutDir }) }
+  if (saveTimer) {
+    clearTimeout(saveTimer); saveTimer = null
+    const patch = pendingPatch
+    pendingPatch = {}
+    if (Object.keys(patch).length) void api.invoke('settings:set', patch)
+  }
 })
 
-/** 改动即保存：目录输入走独立 dirTimer 防抖 400ms；其余设置走 saveTimer，互不清理对方的定时器 */
+let pendingPatch: Partial<UiSettings> = {}
+
+/** 改动即保存：目录输入走独立 dirTimer 防抖 400ms；其余设置走 saveTimer，互不清理对方的定时器。
+ * 同一 tick 的多个 patch 合并成一次落盘（此前互相覆盖，只保留最后一个）。 */
 function save(patch: Partial<UiSettings>, delay = 0): void {
+  pendingPatch = { ...pendingPatch, ...patch }
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
-  saveTimer = setTimeout(() => { saveTimer = null; void api.invoke('settings:set', patch) }, delay)
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    const p = pendingPatch
+    pendingPatch = {}
+    void api.invoke('settings:set', p)
+  }, delay)
 }
 
 function setQuality(q: UiSettings['quality']): void {

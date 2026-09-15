@@ -34,10 +34,12 @@ export function createNeClient(fetchImpl: typeof fetch = fetch): NeClient {
         try {
           return JSON.parse(text) as T
         } catch {
-          throw new QqApiError(`非 JSON 响应: ${text.slice(0, 80)}`, res.status)
+          // 5xx/429 的 HTML 网关页可重试；4xx/2xx 非 JSON 视为确定性错误
+          const transient = res.status >= 500 || res.status === 429
+          throw new QqApiError(`非 JSON 响应: ${text.slice(0, 80)}`, res.status, undefined, transient)
         }
       } catch (err) {
-        if (err instanceof QqApiError) throw err
+        if (err instanceof QqApiError && !err.retryable) throw err
         lastErr = err
       }
     }

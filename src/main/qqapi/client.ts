@@ -73,7 +73,9 @@ export function createQqClient(fetchImpl: FetchLike, auth: QqAuthState) {
         try {
           json = JSON.parse(text)
         } catch {
-          throw new QqApiError(`非 JSON 响应: ${text.slice(0, 80)}`, res.status)
+          // 5xx/429 的 HTML 网关页是可重试的瞬时错误；4xx/2xx 非 JSON 视为确定性错误
+          const transient = res.status >= 500 || res.status === 429
+          throw new QqApiError(`非 JSON 响应: ${text.slice(0, 80)}`, res.status, undefined, transient)
         }
         let node: unknown = json
         for (const key of opts.path) {
@@ -86,8 +88,9 @@ export function createQqClient(fetchImpl: FetchLike, auth: QqAuthState) {
         return node
       } catch (err) {
         lastErr = err
-        // QqApiError 是确定性错误（风控/路径缺失/非 JSON），重试无意义，立即止损
-        if (err instanceof QqApiError) break
+        // QqApiError 中的确定性错误（风控/路径缺失/4xx 非 JSON）重试无意义，立即止损；
+        // retryable（5xx/429）继续退避重试
+        if (err instanceof QqApiError && !err.retryable) break
       }
     }
     throw lastErr instanceof Error ? lastErr : new QqApiError(String(lastErr))

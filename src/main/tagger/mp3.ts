@@ -6,7 +6,7 @@ interface SyncLine { timeStamp: number; text: string }
 /** 解析 LRC 行 → SYLT 条目（时间戳 ms）。非 LRC 行（无时间戳）忽略。 */
 export function parseLrcToSylt(lrc: string): SyncLine[] {
   const out: SyncLine[] = []
-  const re = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g
+  const re = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g
   for (const line of lrc.split('\n')) {
     const timestamps = [...line.matchAll(re)]
     if (timestamps.length === 0) continue

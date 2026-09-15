@@ -9,6 +9,14 @@ export const NE_LADDER: Quality[] = ['flac', '320', '128']
 
 export interface NeAudioUrlResult { url: string; quality: Quality; downgraded: boolean }
 
+/** 从响应 br 反查实际质量档（服务端可能在请求无损时返回 320k 流，不能按请求档存扩展名） */
+export function qualityFromBr(br: unknown): Quality | undefined {
+  if (typeof br !== 'number' || !Number.isFinite(br) || br <= 0) return undefined
+  if (br >= 900000) return 'flac'
+  if (br >= 256000) return '320'
+  return '128'
+}
+
 export async function neGetAudioUrl(
   client: NeClient,
   id: number,
@@ -24,10 +32,16 @@ export async function neGetAudioUrl(
     const json = await client.getJson<{ code?: number; data?: Array<{ url?: string | null; br?: number }> }>(
       `https://music.163.com/api/song/enhance/player/url?ids=[${id}]&br=${br}`,
     )
-    const url = json?.data?.[0]?.url
+    const row = json?.data?.[0]
+    const url = row?.url
     // 诊断：只记命中与否 + 业务码，不记直链（失败现场定位：版权空 vs 风控 vs 权益）
-    debug?.(`ne vkey ${id} ${q}(br=${br})：${url ? '命中' : `空(code=${json?.code ?? '?'})`}`)
-    if (url) return { url, quality: q, downgraded: !supported || i > startIdx }
+    debug?.(`ne vkey ${id} ${q}(br=${br})：${url ? `命中(实际br=${row?.br ?? '?'})` : `空(code=${json?.code ?? '?'})`}`)
+    if (url) {
+      // 以响应 br 校正实际质量；拿不到 br 才回退请求档
+      const actual = qualityFromBr(row?.br) ?? q
+      const actualIdx = NE_LADDER.indexOf(actual)
+      return { url, quality: actual, downgraded: !supported || actualIdx > startIdx }
+    }
   }
   throw new QqApiError(
     // 2026-09-06 真实网络冒烟：普通歌匿名 320k 可下（code 200）；个别版权歌匿名 url

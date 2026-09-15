@@ -49,6 +49,13 @@ describe('neGetAudioUrl', () => {
     expect(err.code).toBe('no-playable-url')
   })
 
+  it('请求无损但服务端返回 320 流（br=320000）→ 判为 320 且降级（不得按 flac 扩展名落盘）', async () => {
+    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/a.mp3', br: 320000 }]))
+    const r = await neGetAudioUrl(client, 103027, 'flac')
+    expect(r.quality).toBe('320')
+    expect(r.downgraded).toBe(true)
+  })
+
   it('ape/m4a 请求档不在支持表 → 从 320 起试', async () => {
     const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/320.mp3', br: 320000 }]))
     const r = await neGetAudioUrl(client, 103027, 'ape')

@@ -16,7 +16,7 @@ export class DownloadHttpError extends Error {
 
 export interface DownloadOptions {
   retries?: number           // 默认 2，退避 1s/2s
-  timeoutMs?: number         // 单次请求超时，默认 30000（无 signal 时用 AbortSignal.timeout）
+  timeoutMs?: number         // 「无数据」间隔超时，默认 30000（持续有数据不超时；总时长不限）
   signal?: AbortSignal       // 调用方取消/超时信号
   onProgress?: (got: number, total: number) => void
 }
@@ -39,11 +39,18 @@ export async function downloadFile(
       throw reason instanceof Error ? reason : new Error('已取消')
     }
     if (attempt > 0) await sleep(1000 * 2 ** (attempt - 1))
+    // 无数据间隔超时：每收到一块数据就重新计时，避免大文件/慢链路被「总时长 30s」误杀
+    const ctrl = new AbortController()
+    const onOuterAbort = (): void => ctrl.abort((opts.signal as { reason?: unknown } | undefined)?.reason)
+    if (opts.signal) opts.signal.addEventListener('abort', onOuterAbort, { once: true })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const arm = (): void => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => ctrl.abort(new Error('下载超时：长时间无数据')), timeoutMs)
+    }
     try {
-      const signal = opts.signal
-        ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)])
-        : AbortSignal.timeout(timeoutMs)
-      const res = await fetch(url, { redirect: 'follow', signal })
+      arm()
+      const res = await fetch(url, { redirect: 'follow', signal: ctrl.signal })
       if (!res.ok) throw new DownloadHttpError(`HTTP ${res.status}`, res.status)
       const total = Number(res.headers.get('content-length') ?? 0)
       const body = res.body
@@ -54,6 +61,7 @@ export async function downloadFile(
       const counter = new PassThrough()
       counter.on('data', (chunk: Buffer) => {
         got += chunk.length
+        arm()
         opts.onProgress?.(got, total)
       })
       // pipeline 自带背压，流错误（写盘失败/中断）会 reject 并走重试
@@ -67,7 +75,13 @@ export async function downloadFile(
       // 避免 3 次 × 30s 白等；由上层 runner 重取直链后重下
       if (err instanceof DownloadHttpError && (err.status === 404 || err.status === 403)) throw err
       lastErr = err
-      if (fs.existsSync(part)) fs.unlinkSync(part)
+      // 清理 .part：unlink 自身失败（句柄未释放等）不能顶替真实错误、也不能中断重试
+      try {
+        if (fs.existsSync(part)) fs.unlinkSync(part)
+      } catch { /* 留给下次覆盖写 */ }
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (opts.signal) opts.signal.removeEventListener('abort', onOuterAbort)
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))

@@ -64,13 +64,20 @@ const POLL_INTERVAL_MS = 500
 const LOGIN_TIMEOUT_MS = 30000
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
-/** 追加一行诊断日志（仅 AuthOptions.debugLogFile 设置时生效；含时间戳） */
+/** 诊断日志脱敏：Set-Cookie/location/body 里可能夹带会话凭证，落盘前统一打码。
+ * （README/DISCLAIMER 承诺日志不记密钥与直链；qrsig/p_skey/ptsigx/OAuth code 均属敏感值） */
+const SECRET_RE = /((?:qrsig|p_skey|ptsigx|skey|p_uin|code|qqmusic_key|qm_keyst|musickey)=)([^&;\s,'"]+)/gi
+function redactSecrets(line: string): string {
+  return line.replace(SECRET_RE, '$1***')
+}
+
+/** 追加一行诊断日志（仅 AuthOptions.debugLogFile 设置时生效；含时间戳；凭证打码） */
 function makeDbg(opts: { debugLogFile?: string }) {
   const file = opts.debugLogFile
   if (!file) return () => {}
   return (line: string): void => {
     try {
-      fs.appendFileSync(file, `[${new Date().toISOString()}] ${line}\n`, 'utf-8')
+      fs.appendFileSync(file, `[${new Date().toISOString()}] ${redactSecrets(line)}\n`, 'utf-8')
     } catch {
       // 诊断失败不影响登录流程
     }
@@ -166,7 +173,10 @@ export function createAuth(options: AuthOptions): Auth {
   ): Promise<{ finalUrl: string; finalStatus: number; body: Buffer }> {
     let url = rawUrl
     for (let hop = 0; hop <= maxHops; hop++) {
-      const res = await fetchImpl(url, { ...init, redirect: 'manual' })
+      // 每跳用当前 cookieJar 重建 Cookie 头：上一跳 Set-Cookie 种下的凭证必须带到下一跳
+      // （否则 redirect 链后续跳收不到前跳 cookie，与「逐跳跟随并逐跳收 Cookie」契约相悖）
+      const headers = { ...(init.headers as Record<string, string> | undefined), cookie: cookieJar }
+      const res = await fetchImpl(url, { ...init, headers, redirect: 'manual' })
       mergeSetCookies(res)
       const body = Buffer.from(await res.arrayBuffer())
       dbg(
@@ -293,6 +303,9 @@ export function createAuth(options: AuthOptions): Auth {
     // 3) 500ms 间隔轮询直到非 waiting/scanned 或超时（参考自 Spica qqmusic.py:357-388）
     // 会话守卫：state 必须 waiting（无会话 / 终态 loggedIn·failed 一律抛错，不空转假超时）
     if (sessionState !== 'waiting') throw new Error('当前无进行中的扫码会话')
+    // 渲染侧先 poll() 到 success 再调用本函数：checkSigUrl 已就绪，直接完成登录，切勿再打一次
+    // ptqrlogin（二维码已被消费，服务端可能回 65/68 把成功登录误判为失效）
+    if (checkSigUrl) return finishLogin()
     const deadline = Date.now() + Math.max(0, timeoutMs)
     try {
       while (true) {
@@ -504,9 +517,11 @@ export function createAuth(options: AuthOptions): Auth {
 
   function getStatus(): AuthStatus {
     if (sessionState === 'waiting') return { state: 'waiting' }
-    if (sessionState === 'failed') return { state: 'failed', error: lastError }
+    // 已有有效持久化凭证时优先按已登录：重新扫码失败不该把本来有效的会话显示成未登录
+    // （startQr 不会清除旧凭证，qqClient 也仍带旧 cookie）
     const saved = readCookieFile()
     if (saved) return { state: 'loggedIn', uin: saved.uin }
+    if (sessionState === 'failed') return { state: 'failed', error: lastError }
     return { state: 'anonymous' }
   }
 
@@ -534,7 +549,10 @@ export function createAuth(options: AuthOptions): Auth {
   /** 参考 Spica save_login（qqmusic.py:251-258）：JSON { uin, cookie } 落盘 */
   function persist(c: AuthCookie): void {
     fs.mkdirSync(path.dirname(cookiePath), { recursive: true })
-    fs.writeFileSync(cookiePath, JSON.stringify(c), 'utf-8')
+    // 原子写：临时文件 + rename，崩溃不留半截 JSON（半截文件会被 readCookieFile 当未登录）
+    const tmp = `${cookiePath}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(c), 'utf-8')
+    fs.renameSync(tmp, cookiePath)
   }
 
   /** 参考 Spica load_login（qqmusic.py:235-248）：损坏/缺字段按匿名，不抛。

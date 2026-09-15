@@ -23,6 +23,7 @@ describe('parseLrcToSylt', () => {
       ],
     },
     { name: '小数毫秒 .5 → 500ms', lrc: '[00:00.5]半秒', expected: [{ timeStamp: 500, text: '半秒' }] },
+    { name: '三位数分钟（长曲）', lrc: '[100:01.00]长曲', expected: [{ timeStamp: (100 * 60 + 1) * 1000, text: '长曲' }] },
     {
       name: '空文本行跳过',
       lrc: '[00:01.00]第一行\n[00:02.00]\n[00:03.00]第三行',

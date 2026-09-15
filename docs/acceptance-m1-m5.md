@@ -62,7 +62,7 @@
 2. **登录 p_skey 问题（已修复）**：2026-09-02 冒烟归因「设备风控」有误——2026-09-04 调查实锤为 check_sig 重定向链未跟随的移植缺陷（b6b4569 + f649af6），Spica 同账号可成功即证。**待用户真实扫码复验**。
 2. **musicu 搜索服务门控**（2026-09-02 实测）：`DoSearchForQQMusicDesktop` 从本机返回全空列表（code=0、sum=0），经典 `client_search_cp`（JSONP 端点）正常。若用户环境同样复现，可考虑后续为搜索增加 client_search_cp 回退或登录态重试。
 3. **node-id3 v2.3+ UTF-16 偏差**：node-id3 以 UTF-16 写文本帧/USLT/SYLT，个别旧播放器可能不识别或乱码；foobar2000 / Musicolet 现代版本按 UTF-16 读取无碍。若出现歌词乱码，优先排查播放器端编码设置。
-4. **「仅另存 .lrc」模式的语义偏差**：`tagFile` 只要 `meta.lyrics` 非空即内嵌（tagMp3/tagFlac 无条件写歌词帧），`lyricMode='lrc'` 时 USLT/SYLT 仍会被内嵌（saveLrc 只控制 .lrc 另存）。与计划 Task 11 既定实现一致；若需严格分离，需给 tagFile 增加 embed 开关（后续可做）。
+4. **「仅另存 .lrc」模式（2026-09-16 已修复）**：此前 `tagFile` 只要 `meta.lyrics` 非空即内嵌，`lyricMode='lrc'` 时 USLT/SYLT 仍会被内嵌。现下载管线与解密补全均在 app 层解耦：`lrc` 只写 `.lrc` 不内嵌、`none` 既不取歌词也不内嵌、`both`/`embed` 才内嵌；`tagFile` 的 `saveLrc` 仅保留兼容语义。
 5. **mgg/mflac 解密与 .ogg 标签**：解密与 OGG 容器 vorbis comment 写入属 M6 解密计划（`vorbis.ts` 目前只支持 FLAC），M1-M5 不覆盖。
 6. **风控阈值**：实现取保守 1rps 全局限速 + QqApiError（风控/路径缺失等确定性错误）不重试。M4 验收（批量 30 首）时需在用户网络定量校准。
 7. **歌词为空不阻塞**：歌词接口失败/无词一律返回空串，标签与 .lrc 均跳过该帧，下载不中断（单元测试覆盖）。

@@ -82,6 +82,25 @@ describe('nePlaylistPage', () => {
   })
 })
 
+describe('nePlaylistPage', () => {
+  it('trackIds 少于 trackCount 时 more 仍按 total（不提前判到底丢歌）', async () => {
+    const fetchImpl = (async (input: any) => {
+      const url = String(input)
+      if (url.includes('/api/v6/playlist/detail')) {
+        return new Response(JSON.stringify({ playlist: { trackCount: 5, trackIds: [{ id: 1 }, { id: 2 }] } }), { status: 200 })
+      }
+      if (url.includes('/api/song/detail')) {
+        return new Response(JSON.stringify({ songs: [{ id: 1, name: 'A', fee: 0, artists: [{ name: 'X' }], album: { name: 'Y' } }] }), { status: 200 })
+      }
+      return new Response('{}', { status: 404 })
+    }) as unknown as typeof fetch
+    const client = createNeClient(fetchImpl)
+    const r = await nePlaylistPage(client, 'trunc-1', 0, 2)
+    expect(r?.total).toBe(5)
+    expect(r?.more).toBe(true) // nextOffset=2 < total=5
+  })
+})
+
 describe('neSearch', () => {
   it('cloudsearch/pc 解析成 TrackDTO[]', async () => {
     const client = createNeClient(routedFetch())

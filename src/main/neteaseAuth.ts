@@ -32,7 +32,10 @@ export function createNeAuth(opts: { cookiePath: string }): NeAuth {
   }
   const write = (cookie: string): void => {
     fs.mkdirSync(path.dirname(opts.cookiePath), { recursive: true })
-    fs.writeFileSync(opts.cookiePath, JSON.stringify({ cookie }, null, 2), 'utf-8')
+    // 原子写：临时文件 + rename（避免崩溃留下半截 JSON 被当未登录）
+    const tmp = `${opts.cookiePath}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify({ cookie }, null, 2), 'utf-8')
+    fs.renameSync(tmp, opts.cookiePath)
   }
 
   return {

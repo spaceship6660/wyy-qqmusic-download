@@ -20,7 +20,7 @@
 
 ### 下歌：质量与队列
 
-- **质量档位**：无损（flac）/ APE / 320k / 128k / m4a（QQ）；拿不到自动降级，「我的下载」里黄条提示（进行中与已完成都显示）。
+- **质量档位**：无损（flac）/ APE / 320k / 128k / m4a（QQ）；拿不到自动降级，「我的下载」里黄条提示（进行中与已完成都显示）。APE/m4a 无标签写入器，可正常下载但**不内嵌封面/歌词**（按歌词档只另存 `.lrc`）。
 - **下载身份（两源可单独设）**：登录账户 / 匿名二选一，只影响下载直链用的凭证（歌单浏览仍用登录态）。个别账号登录态反而拿不到直链时切匿名试试；匿名拿不到无损。设置页改，即时生效。
 - **本批选项**：码率 + 歌词模式选择条在所有歌曲列表页顶部**吸顶显示**，翻多长都看得见；改动即存为默认值，下次打开接着用。
 - **下载不跳页**：点「下载选中」后留在当前列表继续勾选；左上弹出下载浮卡（曲名 + 进度，可收起），点标题进我的下载。
@@ -31,7 +31,7 @@
 ### 歌词与标签
 
 - **中文译文自动合并**：网易云 `tlyric` + QQ（`trans:1` 参数）译文按**时间戳**配对，插到原文行下中日对照；作词/作曲头行不动，QQ 的 `//` 占位行与注音标签自动丢弃。源头没有译文的歌保持原文（QQ 译文覆盖本就少于网易云）。
-- **歌词四档**：内嵌+另存 .lrc / 仅内嵌 / 仅另存 / 不保存。
+- **歌词四档**：内嵌+另存 .lrc / 仅内嵌 / 仅另存（不内嵌）/ 不保存（不取歌词）。
 - **播放器兼容**：封面必内嵌（MP3=APIC / FLAC=PICTURE）；MP3 写 ID3v2.3 USLT+SYLT 双帧，FLAC/OGG 写 Vorbis `LYRICS`+`UNSYNCEDLYRICS` 双键——foobar2000 装 ESLyric 等任意歌词组件即可显示，Musicolet 原生读取。
 
 ### 浏览体验：缓存
@@ -87,7 +87,7 @@ npx vitest run
 - Electron 36 / electron-vite / Vue 3 + Pinia / TypeScript / Vitest / node-id3 / music-metadata（测试读回验证）
 - 主进程（纯 Node）模块：`qqapi/`（QQ 接口）、`neteaseapi/`（网易云接口，参照 Creamplayer 端点）、`auth`/`neteaseAuth`（登录）、`downloader/`（队列/限速/文件）、`tagger/`（MP3/FLAC 标签）、`lyricMerge.ts`（中外文歌词时间戳配对合并）、`unlock/`（mflac/mgg 解密：TEA/密钥派生/密码器/文件解码器）、`app.ts`（依赖树 + IPC）
 - 渲染器：`stores/`（含列表来源标记防串台下载）+ `components/`（搜索/网格/队列/登录/设置/网易云/解密 Tab）
-- 测试：`tests/`（150 用例全绿：client/数据层/直链/登录/队列/标签/歌词合并/app 集成/renderer store/unlock 向量，全部 mock 或本地 server；真实网络仅手工验收）
+- 测试：`tests/`（189 用例全绿：client/数据层/直链/登录/队列/标签/歌词合并/app 集成/renderer store/unlock 向量，全部 mock 或本地 server；真实网络仅手工验收）
 
 ## 文档索引（`docs/`）
 
@@ -119,6 +119,6 @@ npx vitest run
 ## 隐私与合规
 
 - 登录凭证（QQ/网易云 cookie）明文存于用户数据目录（`userData/qqmusic_cookie.json`、`netease_cookie.json`），仅本机使用，不入库、不打印、不上传。
-- QQ 登录尝试与 vkey 失败现场写本地诊断日志（`userData/qq-login-diag.log`，只记 QQ 号、接口字段名与每档有无，不记密钥与直链），仅排障用；审计后可直接删除。
+- QQ 登录尝试与 vkey 失败现场写本地诊断日志（`userData/qq-login-diag.log`，只记 QQ 号、接口字段名与每档有无，不记密钥与直链；cookie/OAuth code 等凭证值落盘前一律打码），仅排障用；审计后可直接删除。
 - 所有请求直连国内服务（绕过系统代理），Referer/UA 模拟浏览器；下载管线限速 1 请求/秒。
 - **使用边界**：本工具仅供个人下载**已获授权的歌曲**（如已购买会员可下载的曲目、免费歌曲）与解密本人缓存文件备份；禁止绕过付费、传播与商业使用。完整声明见 [`DISCLAIMER.md`](./DISCLAIMER.md)，使用即视为同意。

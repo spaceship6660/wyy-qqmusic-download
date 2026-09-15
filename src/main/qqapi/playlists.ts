@@ -148,7 +148,8 @@ export async function getDissTracksPage(
   let totalSource = 'fallback'
   for (const [name, v] of totalCandidates) {
     const n = Number(v)
-    if (Number.isFinite(n) && n >= 0) {
+    // total=0 视为缺失：服务端对超长歌单会返回 0，若采信会 more=false 只显示第一页
+    if (Number.isFinite(n) && n > 0) {
       total = n
       totalSource = name
       break

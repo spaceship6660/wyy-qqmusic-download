@@ -79,6 +79,9 @@ export async function tagFlac(path: string, meta: TagMeta): Promise<void> {
     last = (header & 0x80000000) !== 0
     const len = header & 0x00ffffff
     offset += 4
+    // 越界防御：损坏/截断的 FLAC 会让 offset 冲过 EOF，后续 subarray(audioStart) 得到空音频、
+    // 静默产出只剩表头的坏文件；宁可显式报错
+    if (offset + len > buf.length) throw new Error('FLAC 元数据块越界（文件损坏）')
     blocks.push({ type, data: buf.subarray(offset, offset + len) })
     offset += len
   }
@@ -114,9 +117,14 @@ export async function tagFlac(path: string, meta: TagMeta): Promise<void> {
     appendBlock(b.type, b.data, false)
   }
   if (!streamInfoSeen) throw new Error('FLAC 缺少 STREAMINFO 块')
-  appendBlock(4, comment, !picture)
-  if (picture) appendBlock(6, picture, true)
+  // 没有新封面时保留文件原有 PICTURE（否则重新打标签会把已有封面剥掉）
+  const trailingPictures = picture ? [picture] : blocks.filter((b) => b.type === 6).map((b) => b.data)
+  appendBlock(4, comment, trailingPictures.length === 0)
+  trailingPictures.forEach((data, i) => appendBlock(6, data, i === trailingPictures.length - 1))
 
   out.push(buf.subarray(audioStart))
-  await fs.promises.writeFile(path, Buffer.concat(out))
+  // 原子写：临时文件 + rename；避免重写中途崩溃留下被截断的 FLAC
+  const tmp = `${path}.tmp`
+  await fs.promises.writeFile(tmp, Buffer.concat(out))
+  await fs.promises.rename(tmp, path)
 }

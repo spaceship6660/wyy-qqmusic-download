@@ -32,9 +32,16 @@ export class DownloadQueue extends EventEmitter {
 
   constructor(private deps: QueueDeps) { super() }
 
-  /** 运行时调整并发（settingsSet 生效；下限 1） */
+  /** 运行时调整并发（settingsSet 生效；下限 1）；调高后立刻补调度排队中的任务 */
   setConcurrency(n: number): void {
-    this.deps.concurrency = Math.max(1, n)
+    // NaN 会让 `running < concurrency` 恒 false → pump 停摆；非有限值一律忽略
+    if (Number.isFinite(n)) this.deps.concurrency = Math.max(1, Math.floor(n))
+    this.pump()
+  }
+
+  /** 该 id 是否仍在排队或下载中（重试去重用：防止同 id 二次入队覆盖 inflight） */
+  has(id: string): boolean {
+    return this.inflight.has(id) || this.queue.some((j) => j.id === id)
   }
 
   enqueue(jobs: DownloadJob[]): void {
@@ -88,7 +95,9 @@ export class DownloadQueue extends EventEmitter {
         }
       }, ctrl.signal)) ?? {}
       if (cancelled()) {
-        // 取消恰好在收尾前到达：按取消算（产物若已落盘保留，不删用户文件）
+        // 取消恰好在收尾前到达：按取消算（产物若已落盘保留，不删用户文件），
+        // 仍记录 outputPath，便于 UI/日志定位已产出的文件
+        job.outputPath = outputPath
         finishCancelled()
         return
       }
@@ -133,8 +142,14 @@ export class DownloadQueue extends EventEmitter {
   waitIdle(ms: number): Promise<void> {
     if (this.running === 0 && this.queue.length === 0) return Promise.resolve()
     return new Promise((resolve) => {
-      const t = setTimeout(resolve, ms)
-      this.idleResolvers.push(() => { clearTimeout(t); resolve() })
+      const entry = () => { clearTimeout(t); resolve() }
+      const t = setTimeout(() => {
+        // 超时后移除已注册的 resolver，避免其残留、下次 idle 时被当 no-op 调用（累积泄漏）
+        const i = this.idleResolvers.indexOf(entry)
+        if (i >= 0) this.idleResolvers.splice(i, 1)
+        resolve()
+      }, ms)
+      this.idleResolvers.push(entry)
     })
   }
 }

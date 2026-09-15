@@ -43,7 +43,8 @@ export function decryptQmcFile(file: Uint8Array): QmcDecryptResult {
     const rawMetaLen = readUInt32BE(file, fileSize - 8)
     if (rawMetaLen < 3 || rawMetaLen > fileSize - 8) throw qmcError('format', 'QTag 元数据长度非法')
     audioLen = fileSize - 8 - rawMetaLen
-    const metaText = String.fromCharCode(...file.subarray(fileSize - 8 - rawMetaLen, fileSize - 8))
+    // 勿用 String.fromCharCode(...arr)：meta 可达数十万字节，展开会 RangeError（爆栈）
+    const metaText = Buffer.from(file.subarray(fileSize - 8 - rawMetaLen, fileSize - 8)).toString('latin1')
     const items = metaText.split(',')
     if (items.length !== 3) throw qmcError('format', 'QTag 元数据格式错误（需 3 段）')
     decodedKey = deriveKey(Buffer.from(items[0], 'latin1'))

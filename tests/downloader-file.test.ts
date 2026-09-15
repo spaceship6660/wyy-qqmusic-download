@@ -116,6 +116,29 @@ describe('downloadFile', () => {
     server.close(); fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('持续有数据时不因「总时长」超时（超时为无数据间隔）', async () => {
+    // 总时长 ~480ms 远超 timeoutMs=150，但每 60ms 有数据 → 必须成功（旧实现按总时长 abort 必挂）
+    const payload = Buffer.alloc(32 * 1024, 5)
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-length': String(payload.length) })
+      let sent = 0
+      const chunk = 4096
+      const iv = setInterval(() => {
+        if (sent >= payload.length) { clearInterval(iv); res.end(); return }
+        res.write(payload.subarray(sent, sent + chunk))
+        sent += chunk
+      }, 60)
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as any).port
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dl8-'))
+    const dest = path.join(dir, 'out.mp3')
+    const { size } = await downloadFile(`http://127.0.0.1:${port}/slow.mp3`, dest, { retries: 0, timeoutMs: 150 })
+    expect(size).toBe(payload.length)
+    expect(fs.readFileSync(dest)).toEqual(payload)
+    server.close(); fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('非 2xx 抛出 DownloadHttpError 且 status 可区分', async () => {
     const server = http.createServer((_req, res) => { res.writeHead(404); res.end() })
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))

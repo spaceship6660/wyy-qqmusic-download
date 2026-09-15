@@ -34,6 +34,15 @@ describe('createNeClient', () => {
     await expect(client.getJson('https://music.163.com/api/x')).rejects.toThrow(QqApiError)
   })
 
+  it('5xx 非 JSON 网关页视为可重试（一次 502 一次成功）', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('<html>502 Bad Gateway</html>', { status: 502 }))
+      .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
+    const client = createNeClient(fetchMock as any)
+    expect(await client.getJson('https://music.163.com/api/x')).toEqual({ ok: true })
+    expect((fetchMock as any).mock.calls.length).toBe(2)
+  })
+
   it('网络错误重试后成功', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError('fetch failed'))

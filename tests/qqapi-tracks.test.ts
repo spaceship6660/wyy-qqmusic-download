@@ -71,12 +71,22 @@ describe('链接解析', () => {
     expect(parseLink('https://y.qq.com/n/ryqq/albumDetail/000gXCTb2AhRR1')).toEqual({ kind: 'album', id: '000gXCTb2AhRR1' })
     expect(parseLink('随便一句话')).toBeNull()
   })
+  it('hostname 校验：伪造 host 或任意文本内嵌链接不误判', () => {
+    expect(parseLink('https://evily.qq.com/n/ryqq/songDetail/ABC')).toBeNull()
+    expect(parseLink('https://evil.example/?u=https://y.qq.com/n/ryqq/songDetail/ABC')).toBeNull()
+    expect(parseLink('y.qq.com/n/ryqq/playlist/123')).toEqual({ kind: 'playlist', id: '123' }) // 缺协议补 https
+  })
 })
 
 describe('stripJsonp', () => {
   it('剥离 JSONP 包裹，普通 JSON 原样返回', () => {
     expect(stripJsonp('MusicJsonCallback({});')).toBe('{}')
     expect(stripJsonp('{"a":1}')).toBe('{"a":1}')
+  })
+  it('多行 JSONP 回调体也可剥离（`.` 不匹配换行，此前会残留包裹导致 JSON.parse 抛错）', () => {
+    const wrapped = 'MusicJsonCallback({\n  "a": 1\n});'
+    expect(stripJsonp(wrapped)).toBe('{\n  "a": 1\n}')
+    expect(JSON.parse(stripJsonp(wrapped))).toEqual({ a: 1 })
   })
 })
 

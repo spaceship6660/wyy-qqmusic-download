@@ -102,6 +102,12 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
           { status: 200 },
         )
       }
+      if (body.req_2?.method === 'GetPlayLyricInfo') {
+        return new Response(
+          JSON.stringify({ req_2: { data: { lyric: Buffer.from('[00:01.00]LRC行').toString('base64') } } }),
+          { status: 200 },
+        )
+      }
       if (body.info?.method === 'get_song_detail_yqq') {
         if (opts.detailBroken) return new Response(JSON.stringify({ info: { code: 0 } }), { status: 200 })
         return new Response(
@@ -136,7 +142,7 @@ interface Env {
   dl: string      // 下载目录
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
-  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; failedErrors: string[] }
+  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; failedErrors: string[]; startIds: string[]; failedIds: string[] }
   fetchMock: ReturnType<typeof vi.fn>
 }
 
@@ -158,16 +164,17 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0, opts.failFirst ?? {})
   const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey, neDeadUrl: opts.neDeadUrl })
-  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, failedErrors: [] as string[] }
+  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, failedErrors: [] as string[], startIds: [] as string[], failedIds: [] as string[] }
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
     emitEvent: (ch, payload) => {
-      const p = payload as { outputPath?: string; anonFallback?: boolean; error?: string }
+      const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; error?: string }
       if (ch === 'dl:jobStart') {
         events.start++
         events.active++
         events.peak = Math.max(events.peak, events.active)
+        if (p.id) events.startIds.push(p.id)
       }
       if (ch === 'dl:done') {
         events.done++
@@ -179,6 +186,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
         events.failed++
         events.active--
         if (p.error) events.failedErrors.push(p.error)
+        if (p.id) events.failedIds.push(p.id)
       }
     },
   })
@@ -264,6 +272,25 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.donePaths.length).toBe(1)
   })
 
+  it('settingsSet 忽略非法枚举/空目录与 NaN 并发（防 runner 崩、文件落错目录）', async () => {
+    const env = await makeEnv()
+    const before = env.app.settingsGet()
+    const after = env.app.settingsSet({
+      quality: 'bogus' as any,
+      lyricMode: 'nope' as any,
+      qqIdentity: 'x' as any,
+      downloadDir: '   ',
+      decryptOutDir: '',
+      concurrency: Number.NaN,
+    })
+    expect(after.quality).toBe(before.quality)
+    expect(after.lyricMode).toBe(before.lyricMode)
+    expect(after.qqIdentity).toBe(before.qqIdentity)
+    expect(after.downloadDir).toBe(before.downloadDir)
+    expect(after.decryptOutDir).toBe(before.decryptOutDir)
+    expect(after.concurrency).toBe(before.concurrency)
+  })
+
   it('N1: netease 任务走网易云管线（直链→下载→标签→done）', async () => {
     // lyricMode=embed：歌词内嵌 USLT（music-metadata 读回断言）；直链/歌词/详情全部走 mock 路由
     const env = await makeEnv({ lyricMode: 'embed' })
@@ -310,9 +337,74 @@ describe('createApp runner 装配（T10 评审修复）', () => {
       source: 'netease',
     })
     await waitFor(() => env.events.failed >= 1)
-    env.app.retryFailed('not-a-number')
+    // job id 现为 source:trackId:seq 的唯一形式（跨批次同曲不撞车），按事件里拿到的 id 重试
+    const jobId = env.events.failedIds[0]
+    expect(jobId).toContain('not-a-number')
+    env.app.retryFailed(jobId)
     await waitFor(() => env.events.failed >= 2)
     expect(env.events.done).toBe(0)
+  })
+
+  it('H3: 跨批次同曲重复入队 → job id 唯一（不互相覆盖/串台）', async () => {
+    const env = await makeEnv({ delayMs: 300 })
+    const t = track('dup', '重复歌', '手')
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq' })
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    expect(env.events.startIds.length).toBe(2)
+    expect(new Set(env.events.startIds).size).toBe(2) // 两个 job id 各不相同
+    expect(new Set(env.events.donePaths).size).toBe(2) // 产物也各自独立
+  })
+
+  it('L5: lyricMode=lrc 只另存 .lrc 不内嵌；与 embed 档语义分离', async () => {
+    const env = await makeEnv({ lyricMode: 'lrc' })
+    env.app.enqueue({ tracks: [track('L1', 'lrc歌')], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    const mp3 = fs.readdirSync(env.dl).find((f) => f.endsWith('.mp3'))
+    expect(mp3).toBeTruthy()
+    const mm = await parseFile(path.join(env.dl, mp3!))
+    expect(mm.common.lyrics).toBeUndefined() // 仅另存：不内嵌 USLT
+    const lrc = fs.readFileSync(path.join(env.dl, mp3!.replace(/\.mp3$/, '.lrc')), 'utf-8')
+    expect(lrc).toContain('LRC行') // 侧车 .lrc 已写
+  })
+
+  it('N2b: 网易云空字符串 ID 视为非法（Number("")===0 陷阱）', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: '   ', name: '空 ID', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.events.done).toBe(0)
+  })
+
+  it('retryFailed 重复入队同 id → 第二次拒绝（防 inflight 覆盖/取消串台）', async () => {
+    const env = await makeEnv({ delayMs: 800 })
+    env.app.enqueue({
+      tracks: [{ id: 'not-a-number', name: '坏 ID', artist: '手', album: '', cover: '' }],
+      quality: '320',
+      source: 'netease',
+    })
+    await waitFor(() => env.events.failed >= 1)
+    const id = env.events.failedIds[0]
+    env.app.retryFailed(id)
+    expect(() => env.app.retryFailed(id)).toThrow(/已在队列/)
+    await waitFor(() => env.events.failed >= 2)
+  })
+
+  it('H1: QQ m4a/ape 档无标签写入器 → 仍下载成功（不再被标签步骤删文件）', async () => {
+    const env = await makeEnv({ lyricMode: 'none' })
+    env.app.enqueue({ tracks: [track('m1', 'm4a歌')], quality: 'm4a', source: 'qq' })
+    env.app.enqueue({ tracks: [track('a1', 'ape歌')], quality: 'ape', source: 'qq' })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    const files = fs.readdirSync(env.dl)
+    expect(files.some((f) => f.endsWith('.m4a'))).toBe(true)
+    expect(files.some((f) => f.endsWith('.ape'))).toBe(true)
+    for (const p of env.events.donePaths) expect(fs.statSync(p).size).toBeGreaterThan(0)
   })
 
   it('R2: 未知 jobId 重试抛错（重启后记录清空需重新勾选）', async () => {

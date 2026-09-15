@@ -79,4 +79,22 @@ describe('tagFlac', () => {
     expect(await readBlockData(dest, 6)).toBeUndefined()
     fs.rmSync(dir, { recursive: true, force: true })
   })
+
+  it('再次打标签但无新封面 → 保留原 PICTURE（不剥离已有封面）', async () => {
+    const src = fs.readFileSync(path.join(__dirname, 'fixtures', 'mini.flac'))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flac3-'))
+    const dest = path.join(dir, 'out.flac')
+    fs.writeFileSync(dest, src)
+    await tagFlac(dest, {
+      title: '一次', artist: 'A', album: 'AL', date: '', copyright: '', genre: '',
+      lyrics: '', cover: Buffer.from('IMG1', 'utf-8'), coverMime: 'image/png',
+    })
+    // 第二次无封面（如补全时封面抓取失败）：不得把第一次写进去的封面删掉
+    await tagFlac(dest, { title: '二次', artist: 'A', album: 'AL', date: '', copyright: '', genre: '', lyrics: '', cover: undefined })
+    const md = await parseFile(dest)
+    expect(md.common.title).toBe('二次')
+    expect(md.common.picture?.length).toBe(1)
+    expect(Buffer.from((md.common.picture![0] as any).data).toString('utf-8')).toBe('IMG1')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
 })

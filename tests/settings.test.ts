@@ -26,6 +26,21 @@ describe('settings', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  it('非法字段回退：concurrency 0/非数 → 合法值；目录非字符串 → 默认（防队列永不调度/path 抛错）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st4-'))
+    const file = path.join(dir, 'settings.json')
+    fs.writeFileSync(file, JSON.stringify({ concurrency: 0, downloadDir: 123, decryptOutDir: null }), 'utf-8')
+    const s = loadSettings(file)
+    expect(s.concurrency).toBe(1)
+    expect(s.downloadDir).toBe(DEFAULT_SETTINGS.downloadDir)
+    expect(s.decryptOutDir).toBe(DEFAULT_SETTINGS.decryptOutDir)
+    fs.writeFileSync(file, JSON.stringify({ concurrency: 'x' }), 'utf-8')
+    expect(loadSettings(file).concurrency).toBe(DEFAULT_SETTINGS.concurrency)
+    fs.writeFileSync(file, JSON.stringify({ concurrency: 100000 }), 'utf-8')
+    expect(loadSettings(file).concurrency).toBe(8) // 上限收敛，防一次性起海量任务/timer
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('下载身份默认账户；旧文件缺字段时补默认；保存后可读回', async () => {
     expect(DEFAULT_SETTINGS.qqIdentity).toBe('account')
     expect(DEFAULT_SETTINGS.neIdentity).toBe('account')

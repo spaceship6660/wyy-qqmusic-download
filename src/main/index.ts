@@ -76,6 +76,7 @@ function safeHandle(channel: string, fn: (...args: any[]) => unknown): void {
   ipcMain.handle(channel, async (_e, ...args: any[]) => {
     try {
       const r = await fn(...args)
+      if (r === undefined) return undefined // JSON.parse(undefined) 会抛错，勿误记日志
       try {
         return JSON.parse(JSON.stringify(r))
       } catch (serr) {
@@ -145,7 +146,18 @@ safeHandle('ne:playlists', (uid: number) => appInstance.nePlaylists(uid))
 safeHandle('ne:playlist', (id: string) => appInstance.nePlaylist(id))
 safeHandle('ne:auth:importCookie', (c: string) => appInstance.neAuthImport(c))
 safeHandle('ne:auth:status', () => appInstance.neAuthStatus())
-safeHandle('ne:auth:clear', () => appInstance.neAuthClear())
+ipcMain.handle('ne:auth:clear', async () => {
+  appInstance.neAuthClear()
+  // 退出登录必须同时清 Chromium 持久会话里的 163 cookie，否则重开登录窗会静默带旧 MUSIC_U
+  // （表现为「退出后重开又自动登录」、无法换号）
+  try {
+    const { session } = await import('electron')
+    await session.defaultSession.clearStorageData({ storages: ['cookies'], origin: 'https://music.163.com' })
+  } catch {
+    // 清理失败不影响内存/文件层登出
+  }
+  return true
+})
 ipcMain.handle('ne:auth:open', async () => {
   // 开窗扫码（Creamplayer 模式）：加载 music.163.com/login，窗口关闭即抓 cookie；
   // 窗口生命周期防御：重复打开先关旧窗（按登录页 URL 识别），避免窗口堆积
@@ -154,6 +166,20 @@ ipcMain.handle('ne:auth:open', async () => {
     if (w.webContents.getURL().startsWith('https://music.163.com')) w.destroy()
   }
   const win = new BW({ width: 900, height: 700, autoHideMenuBar: true })
+  // 远程登录页：禁止弹窗，并限制导航停留在 163 域内（防被带到任意来源）。
+  // 注意用精确域/subdomain 判定：`endsWith('163.com')` 会放过 evil163.com。
+  const is163Host = (host: string): boolean => host === '163.com' || host.endsWith('.163.com')
+  const blockForeign = (e: Electron.Event, target: string): void => {
+    try {
+      if (!is163Host(new URL(target).hostname)) e.preventDefault()
+    } catch {
+      e.preventDefault()
+    }
+  }
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', blockForeign)
+  // 服务器 30x 重定向走 will-redirect（will-navigate 不触发）
+  win.webContents.on('will-redirect', blockForeign)
   try {
     await win.loadURL('https://music.163.com/login')
   } catch {
@@ -192,8 +218,16 @@ function createWindow(): void {
   })
   win.on('ready-to-show', () => win.show())
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    // 只把 http(s) 交给系统浏览器；拒绝 file:/smb: 等协议（避免被诱导打开本地可执行文件）
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // 主窗口只应停留在本应用页面，阻止导航到外部来源（外部页面会带着 preload 的 window.api 运行）
+  win.webContents.on('will-navigate', (e, target) => {
+    const appUrl = process.env['ELECTRON_RENDERER_URL']
+    // 生产下必须落在本应用 index.html，而非任意 file://（否则任意本地 HTML 也会挂上 window.api）
+    const ok = appUrl ? target.startsWith(appUrl) : target.includes('/renderer/index.html')
+    if (!ok) e.preventDefault()
   })
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])

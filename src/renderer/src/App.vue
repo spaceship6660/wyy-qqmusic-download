@@ -48,8 +48,9 @@ const searchTab = ref<'song' | 'album'>('song')
 const loadingMore = ref(false)
 const listLoading = ref(false)
 
-// 底栏：当前列表的下载 source + 选中数
-const ctxSource = computed<'qq' | 'netease'>(() => songsView.value?.source ?? (tab.value === 'netease' ? 'netease' : 'qq'))
+// 底栏：当前列表的下载 source + 选中数。
+// 以 store.trackSource（列表真实来源）为准，避免切 tab 后仍残留异源列表时按当前页签错源入队。
+const ctxSource = computed<'qq' | 'netease'>(() => store.trackSource || (tab.value === 'netease' ? 'netease' : 'qq'))
 const selectedCount = computed(() => store.selectedIds.size)
 const activeCount = computed(() => store.queue.filter((j) => j.state === 'queued' || j.state === 'running').length)
 /** 左上浮卡数据源 + 收起态（触发下载时自动展开） */
@@ -69,6 +70,8 @@ const diagLogPath = ref('')
 const contentEl = ref<HTMLElement | null>(null)
 /** 列表请求序号：快速连点侧栏时，慢响应的过期结果直接丢弃（否则旧歌单覆盖新视图，看起来“切不过去”） */
 let loadSeq = 0
+/** 搜索请求序号：快速改词/切 tab 时，慢响应的过期结果直接丢弃（否则旧结果覆盖新结果） */
+let searchSeq = 0
 
 /** 歌曲列表内存缓存（session 级）：切走再回来秒开，不再转圈。
  * SWR 策略：命中先同步渲染旧数据，后台 revalidate 首屏、有 diff 才更新；
@@ -119,8 +122,19 @@ function clearSongsCache(source?: 'qq' | 'netease'): void {
   for (const k of [...songsCache.keys()]) if (k.startsWith(`${source}:`)) songsCache.delete(k)
   if (source === 'qq') albumSearchCache.clear()
 }
-/** QQ 专辑搜索结果缓存（返回上一级 + tab 来回切不再重搜） */
+/** QQ 专辑搜索结果缓存（返回上一级 + tab 来回切不再重搜；与其它缓存一致做 LRU 上限） */
 const albumSearchCache = new Map<string, { query: string; albums: Array<{ mid: string; name: string; singer: string; cover: string; songCount: number }> }>()
+function cacheAlbumSearch(query: string, albums: Array<{ mid: string; name: string; singer: string; cover: string; songCount: number }>): void {
+  albumSearchCache.delete(query)
+  albumSearchCache.set(query, { query, albums })
+  while (albumSearchCache.size > SONGS_CACHE_MAX) {
+    const oldest = albumSearchCache.keys().next()
+    if (oldest.done) break
+    albumSearchCache.delete(oldest.value)
+  }
+}
+/** 专辑搜索独立的加载态：与歌曲列表加载态分离，避免互相提前关掉遮罩 */
+const albumSearching = ref(false)
 /** 当前歌曲页的强制重跑闭包（↻ 刷新按钮用：删缓存后按原参数重拉，返回链保持） */
 let songsReload: (() => Promise<void>) | null = null
 /** 歌曲页返回目的地（专辑列表 / 歌单列表；空则回顶级功能页） */
@@ -142,12 +156,13 @@ function scrollTop(): void {
  * 从歌单页（滚动条在底部）切过去时根本看不见——像没切换成功。
  * 现在同步占位 songsView + 清空旧列表 + 回到顶部，模板全程停留在歌曲页并显示转圈遮罩。
  * 返回本次请求序号，异步落定后凭序号丢弃过期响应。 */
-function enterSongsLoading(title: string, source: 'qq' | 'netease', opts?: { keepAlbums?: boolean }): number {
+function enterSongsLoading(title: string, source: 'qq' | 'netease', opts?: { keepAlbums?: boolean; back?: SongsBack | null }): number {
   loadSeq++
   groupView.value = null
   if (!opts?.keepAlbums) albumsView.value = null
   listNotice.value = ''
-  songsBack.value = null
+  // 返回目的地随加载态一起落地：首屏空/失败时返回按钮仍能回到来源列表
+  songsBack.value = opts?.back ?? null
   songsReload = null
   store.setTracks([], source)
   songsView.value = { title, source }
@@ -176,7 +191,9 @@ async function openSongsView(opts: {
   songsReload = opts.reload
   const hit = opts.force ? undefined : songsCache.get(key)
   if (hit && hit.source === source) {
-    // 秒开：同步渲染旧数据，网络在后台静默追新（有 diff 才更新，无感）
+    // 秒开：同步渲染旧数据，网络在后台静默追新（有 diff 才更新，无感）。
+    // 先作废在途请求：否则上一次的慢响应会在切到本次（缓存）后把视图拽回去
+    loadSeq++
     groupView.value = null
     listNotice.value = ''
     store.setTracks([...hit.tracks], hit.source)
@@ -187,7 +204,7 @@ async function openSongsView(opts: {
     void revalidateSongs(key, opts)
     return
   }
-  const my = enterSongsLoading(title, source, { keepAlbums: opts.keepAlbums })
+  const my = enterSongsLoading(title, source, { keepAlbums: opts.keepAlbums, back })
   songsReload = opts.reload
   try {
     const fp = await opts.fetchFirst()
@@ -225,6 +242,9 @@ async function revalidateSongs(key: string, opts: {
   try {
     const fp = await opts.fetchFirst()
     if (my !== loadSeq || !fp || fp.tracks.length === 0) return // 用户切走/失败/空：静默保留旧缓存
+    // 期间「加载更多」写穿或另一次 revalidate 已替换缓存条目：此时首屏快照已过期，
+    // 继续 diff 会把已追加的分页数据清掉、游标回退 → 直接用旧快照覆盖是错的
+    if (songsCache.get(key) !== entry) return
     if (songsView.value?.cacheKey !== key) {
       entry.fetchedAt = Date.now() // 用户已看别处：只顺手记个时间，不碰视图
       return
@@ -257,6 +277,7 @@ async function revalidateSongs(key: string, opts: {
 
 // ---------- 顶级页切换 ----------
 function goTab(t: Tab): void {
+  loadSeq++ // 作废在途的歌曲列表请求，防止慢响应把视图拉回旧列表
   tab.value = t
   groupView.value = null
   songsView.value = null
@@ -268,6 +289,7 @@ function goTab(t: Tab): void {
 
 /** 歌曲页返回：专辑歌曲→专辑列表；歌单歌曲→歌单列表；其余→顶级功能页 */
 function goBack(): void {
+  loadSeq++
   const back = songsBack.value
   const src = songsView.value?.source ?? 'qq'
   if (back?.kind === 'albums') {
@@ -313,9 +335,12 @@ function cacheSongSearch(text: string, tracks: UiTrack[]): void {
 async function doSearch(force = true): Promise<void> {
   const text = q.value.trim()
   if (!text) return
+  loadSeq++ // 离开歌曲列表视图：作废在途列表请求
+  const my = ++searchSeq
   try {
     if (/y\.qq\.com\/n\/ryqq\/(songDetail|playlist|albumDetail)/.test(text)) {
       const res: any = await api.invoke('qq:linkTracks', text)
+      if (my !== searchSeq) return
       if (res?.tracks?.length) {
         store.setTracks(res.tracks, 'qq')
         songsView.value = { title: '链接导入', source: 'qq' }
@@ -335,6 +360,7 @@ async function doSearch(force = true): Promise<void> {
       }
     }
     const tracks: any = await api.invoke('qq:search', text)
+    if (my !== searchSeq) return // 已发起更新的搜索，丢弃过期结果
     if (!Array.isArray(tracks)) window.alert('搜索失败，请稍后重试')
     else {
       // 内联展示：结果直接铺在搜索页下方，歌曲/专辑 tab 常驻可随时切换（不再跳 songsView）
@@ -346,6 +372,7 @@ async function doSearch(force = true): Promise<void> {
       scrollTop()
     }
   } catch (e) {
+    if (my !== searchSeq) return
     window.alert(e instanceof Error ? e.message : String(e))
   }
 }
@@ -354,6 +381,8 @@ async function doSearch(force = true): Promise<void> {
 async function albumSearch(): Promise<void> {
   const text = q.value.trim()
   if (!text) return
+  loadSeq++
+  const my = ++searchSeq
   groupView.value = null
   songsView.value = null
   songsBack.value = null
@@ -365,26 +394,29 @@ async function albumSearch(): Promise<void> {
     return
   }
   albumsView.value = null
-  listLoading.value = true
+  albumSearching.value = true
   try {
     const albums: any = await api.invoke('qq:albumSearch', text)
+    if (my !== searchSeq) return
     if (!Array.isArray(albums)) {
       listNotice.value = '专辑搜索失败'
       return
     }
-    albumSearchCache.set(text, { query: text, albums })
+    cacheAlbumSearch(text, albums)
     albumsView.value = { source: 'qq', query: text, albums }
   } catch (e) {
+    if (my !== searchSeq) return
     listNotice.value = e instanceof Error ? e.message : String(e)
   } finally {
-    listLoading.value = false
+    if (my === searchSeq) albumSearching.value = false
   }
 }
 
 /** 搜索页歌曲 | 专辑 tab 切换：有关键词时自动按当前 tab 重搜（切过去即出结果，不用再按一次搜索） */
 function switchSearchTab(t: 'song' | 'album'): void {
   searchTab.value = t
-  if (!q.value.trim() || listLoading.value) return
+  if (!q.value.trim()) return
+  // 不因另一次搜索在途而阻塞：searchSeq 会丢弃过期响应，切过去即出（缓存命中零请求）
   if (t === 'song') void doSearch(false)
   else void albumSearch()
 }
@@ -436,14 +468,18 @@ async function loadMoreSongs(): Promise<void> {
   const startedKey = v.cacheKey
   loadingMore.value = true
   listNotice.value = ''
+  // 只有真正追加到新歌才允许兜底自动续拉；空页/失败不算（否则游标仍在 + 内容不足一屏
+  // 会「请求→失败→再请求」紧密循环，既卡界面又狂刷接口触发风控）
+  let appended = false
   // 去重：切走又秒回（缓存渲染）时，在途旧请求的追加不能产生重复行
   const dedupe = (incoming: any[]): any[] => {
     if (!Array.isArray(incoming)) return []
     const seen = new Set(store.tracks.map((t) => t.id))
     return incoming.filter((t) => t?.id && !seen.has(t.id))
   }
-  // 空页时是否真的到底：起始位置已达总数才算到底，否则保留游标可重试
-  const reachEnd = (pos: number, total?: number): boolean => typeof total !== 'number' || pos >= total
+  // 空页时是否真的到底：只有「已知总数且已达总数」才算到底；总数未知时保留游标并提示可重试，
+  // 否则一次风控空页就会被静默当成到底（列表停住且无任何提示）
+  const reachEnd = (pos: number, total?: number): boolean => typeof total === 'number' && pos >= total
   try {
     if (v.cursor.kind === 'qq-diss') {
       const r: any = await api.invoke('qq:dissTracks', {
@@ -462,6 +498,7 @@ async function loadMoreSongs(): Promise<void> {
           listNotice.value = '后续无新歌曲，已停止加载（如数量不对可点 ↻ 刷新重试）'
         } else {
           store.appendTracks(fresh)
+          appended = true
           songsView.value = {
             ...v,
             total: r.total,
@@ -477,7 +514,11 @@ async function loadMoreSongs(): Promise<void> {
       const r: any = await api.invoke('ne:playlistPage', { id: v.cursor.id, offset: v.cursor.offset, limit: 200 })
       if (songsView.value?.cacheKey !== startedKey) return // 中途切走了，本次结果丢弃
       if (r?.tracks?.length) {
-        store.appendTracks(dedupe(r.tracks))
+        const fresh = dedupe(r.tracks)
+        if (fresh.length) {
+          store.appendTracks(fresh)
+          appended = true
+        }
         // 推进用主进程返回的 nextOffset（按请求 batch 推进；song/detail 可能丢歌，
         // 用返回条数推进会造成重叠复拉、翻页错乱）
         const next = typeof r.nextOffset === 'number' ? r.nextOffset : v.cursor.offset + r.tracks.length
@@ -509,7 +550,7 @@ async function loadMoreSongs(): Promise<void> {
     // 下一帧检查仍贴着底部则继续拉，直到填满或到底
     await nextTick()
     const cel = contentEl.value
-    if (songsView.value?.cursor && cel && cel.scrollHeight <= cel.clientHeight + 400 && !loadingMore.value) {
+    if (appended && songsView.value?.cursor && cel && cel.scrollHeight <= cel.clientHeight + 400 && !loadingMore.value) {
       void loadMoreSongs()
     }
   }
@@ -607,6 +648,7 @@ async function openNePlaylist(
 
 /** 歌单列表页（自建/收藏） */
 async function openGroup(source: 'qq' | 'netease', group: 'created' | 'fav'): Promise<void> {
+  loadSeq++
   songsView.value = null
   albumsView.value = null
   songsBack.value = null
@@ -913,16 +955,16 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         />
         <div v-else-if="searchTab === 'song'" class="empty">当前列表是网易云搜索结果，请到「网易云」页查看 / 下载</div>
         <div v-else class="plist-grid">
-          <p v-if="listLoading" class="loading">专辑搜索中…<span class="spinner"></span></p>
+          <p v-if="albumSearching" class="loading">专辑搜索中…<span class="spinner"></span></p>
           <div v-for="a in albumsView?.albums ?? []" :key="a.mid" class="plist-card" @click="openAlbum(a.mid, a.name)">
             <div class="plist-cover" :style="a.cover ? { backgroundImage: `url(${a.cover})` } : {}">{{ a.songCount }} 首</div>
             <div class="plist-name" :title="a.name">{{ a.name }}</div>
             <div class="plist-sub">{{ a.singer }}</div>
           </div>
-          <div v-if="!albumsView && !listLoading" class="empty">输入关键词后按「搜索」查找专辑</div>
+          <div v-if="!albumsView && !albumSearching" class="empty">输入关键词后按「搜索」查找专辑</div>
         </div>
       </section>
-      <section v-else-if="tab === 'netease'"><NeteaseTab /></section>
+      <section v-else-if="tab === 'netease'"><NeteaseTab @changed="onNeAuthChanged" /></section>
       <section v-else-if="tab === 'download'"><DownloadPage /></section>
       <section v-else-if="tab === 'decrypt'"><DecryptTab /></section>
       <section v-else><SettingsPanel /></section>

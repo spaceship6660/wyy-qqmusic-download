@@ -15,8 +15,7 @@ const clean = <T>(v: T): T => {
 export const api = {
   invoke: <T = any>(channel: string, ...args: unknown[]): Promise<T> =>
     window.api.invoke(channel, ...args.map((a) => clean(a))) as Promise<T>,
-  on: (channel: string, cb: (payload: any) => void): void => {
-    window.api.on(channel, (payload) => cb(clean(payload)))
-  },
+  on: (channel: string, cb: (payload: any) => void): (() => void) =>
+    window.api.on(channel, (payload) => cb(clean(payload))),
   getPathForFile: (f: any): string => window.api.getPathForFile(f),
 }

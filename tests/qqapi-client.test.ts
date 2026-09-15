@@ -96,6 +96,23 @@ describe('postMusicu', () => {
     }
   })
 
+  it('5xx 非 JSON 网关页视为可重试（一次 502 一次成功）', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('<html>502</html>', { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response('{"req":{"data":{"body":{"song":{"list":[{"mid":"M1"}]}}}}}', {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      )
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const out = await client.postMusicu({ req: dummyReq }, {
+      path: ['req', 'data', 'body', 'song', 'list'], maxRetries: 1,
+    })
+    expect(out).toEqual([{ mid: 'M1' }])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('QqApiError（风控）不重试：只请求一次', async () => {
     const fetchMock = jsonFetch(200, '')
     const client = createQqClient(fetchMock, { uin: '0' })

@@ -139,15 +139,40 @@ export interface NePlaylistPage {
   nextOffset: number
 }
 
-/** 歌单全量分页（2026-09-06 定型）：v6/detail 的 trackIds 匿名即全量（如 200/125/1581），
- * 歌曲明细用 song/detail 批量拉。页大小默认 200（此前 500：首屏 URL 巨大、响应慢、
- * 一次渲染 500 卡片直接卡死，「我喜欢的音乐加载缓慢」根因之一）。 */
-export async function nePlaylistPage(client: NeClient, id: string, offset: number, pageSize = 200): Promise<NePlaylistPage | null> {
+// trackIds 缓存：分页每次都要 v6/detail（整包 trackIds，长歌单很大）。60s 内复用，
+// 避免 N 次「加载更多」把整包重复下载 N 次（既慢又增加风控面）。key=歌单 id。
+const trackIdsCache = new Map<string, { ids: number[]; total: number; at: number }>()
+const TRACK_IDS_TTL_MS = 60_000
+const TRACK_IDS_CACHE_MAX = 50
+
+/** 登录态变化时清缓存：匿名被截断的 trackIds 不应在登录后 60s 内被复用 */
+export function clearNeteaseTrackIdsCache(): void {
+  trackIdsCache.clear()
+}
+
+async function loadTrackIds(client: NeClient, id: string): Promise<{ ids: number[]; total: number }> {
+  const hit = trackIdsCache.get(id)
+  if (hit && Date.now() - hit.at < TRACK_IDS_TTL_MS) return hit
   const meta = await client.getJson<{ playlist?: { trackCount?: number; trackIds?: Array<{ id: number }> } }>(
     `https://music.163.com/api/v6/playlist/detail/?id=${id}`,
   )
   const ids = (meta?.playlist?.trackIds ?? []).map((t) => t.id).filter((x): x is number => typeof x === 'number')
   const total = meta?.playlist?.trackCount ?? ids.length
+  trackIdsCache.delete(id)
+  trackIdsCache.set(id, { ids, total, at: Date.now() })
+  while (trackIdsCache.size > TRACK_IDS_CACHE_MAX) {
+    const oldest = trackIdsCache.keys().next()
+    if (oldest.done) break
+    trackIdsCache.delete(oldest.value)
+  }
+  return { ids, total }
+}
+
+/** 歌单全量分页（2026-09-06 定型）：v6/detail 的 trackIds 匿名即全量（如 200/125/1581），
+ * 歌曲明细用 song/detail 批量拉。页大小默认 200（此前 500：首屏 URL 巨大、响应慢、
+ * 一次渲染 500 卡片直接卡死，「我喜欢的音乐加载缓慢」根因之一）。 */
+export async function nePlaylistPage(client: NeClient, id: string, offset: number, pageSize = 200): Promise<NePlaylistPage | null> {
+  const { ids, total } = await loadTrackIds(client, id)
   if (ids.length === 0) return null
   const batch = ids.slice(offset, offset + pageSize)
   if (batch.length === 0) return { tracks: [], total, more: false, nextOffset: offset }
@@ -156,5 +181,6 @@ export async function nePlaylistPage(client: NeClient, id: string, offset: numbe
   )
   const tracks = (json?.songs ?? []).filter((t) => t?.id).map(neteaseTrackToDto)
   const nextOffset = offset + batch.length
-  return { tracks, total, more: nextOffset < ids.length, nextOffset }
+  // more 用 total（trackCount）而非 ids.length：trackIds 若被服务端截断也不至于提前判到底
+  return { tracks, total, more: nextOffset < (total > 0 ? total : ids.length), nextOffset }
 }

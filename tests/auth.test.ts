@@ -673,4 +673,131 @@ describe('createAuth', () => {
     expect(String(checkSigCall?.url)).toContain('ptsigx=SIGAB')
     fs.rmSync(dir, { recursive: true, force: true })
   })
+
+  it('诊断日志脱敏：qrsig/p_skey/ptsigx/OAuth code 不落明文', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-diag-'))
+    const logFile = path.join(dir, 'diag.log')
+    const loginMsgs = [
+      "ptuiCB('66','二维码未失效。','')",
+      "ptuiCB('67','二维码认证中。','')",
+      "ptuiCB('0','登录成功！','https://ssl.ptlogin2.qq.com/check_sig?ptqrtoken=K&skey=XYZ&uin=9876&ptsigx=SIGAB')",
+    ]
+    const fetchMock = routerFetch({
+      login: (i) => loginMsgs[Math.min(i, loginMsgs.length - 1)],
+      authorizeLocation:
+        'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F&code=AUTHCODE123&state=state',
+      qqLogin: { req: { code: 0, data: { musicid: 9876, musickey: 'KEY123' } } },
+    })
+    const client = createQqClient(fetchMock, { uin: '0' })
+    const auth = createAuth({
+      qqClient: client,
+      fetchImpl: fetchMock,
+      cookiePath: path.join(dir, 'cookie.json'),
+      debugLogFile: logFile,
+    })
+
+    await auth.startQr()
+    const result = await auth.waitForResult(5000)
+    expect(result.ok).toBe(true)
+
+    const log = fs.readFileSync(logFile, 'utf-8')
+    expect(log).toContain('qrsig=***')
+    expect(log).toContain('p_skey=***')
+    expect(log).not.toContain('qrsig=abc123')
+    expect(log).not.toContain('PSKEY123')
+    expect(log).not.toContain('AUTHCODE123')
+    expect(log).not.toContain('SIGAB')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('先 poll 到 success 再 waitForResult：不再多打一次 ptqrlogin（二维码已消费，服务端可能回 65）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-nopoll-'))
+    const log: { url: string; init?: RequestInit }[] = []
+    const loginMsgs = [
+      "ptuiCB('66','二维码未失效。','')",
+      "ptuiCB('0','登录成功！','https://ssl.ptlogin2.qq.com/check_sig?ptqrtoken=K&uin=9876&ptsigx=SIGAB')",
+    ]
+    const fetchMock = routerFetch({
+      login: (i) => loginMsgs[Math.min(i, loginMsgs.length - 1)],
+      authorizeLocation:
+        'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F&code=AUTHCODE123&state=state',
+      qqLogin: { req: { code: 0, data: { musicid: 9876, musickey: 'KEY123' } } },
+      requestLog: log,
+    })
+    const auth = createAuth({ qqClient: createQqClient(fetchMock, { uin: '0' }), fetchImpl: fetchMock, cookiePath: path.join(dir, 'cookie.json') })
+    await auth.startQr()
+    expect(await auth.poll()).toBe('waiting')
+    expect(await auth.poll()).toBe('success')
+    const isPoll = (c: { url: string }): boolean => {
+      try { return new URL(c.url).pathname === '/ptqrlogin' } catch { return false }
+    }
+    const before = log.filter(isPoll).length
+    const result = await auth.waitForResult(5000)
+    expect(result.ok).toBe(true)
+    const after = log.filter(isPoll).length
+    expect(after).toBe(before) // checkSigUrl 已就绪 → 直接 finishLogin，零新增 ptqrlogin
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('fetchChain 逐跳携带本链 Set-Cookie（redirect 后续跳收得到前跳种的 cookie）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-chain-'))
+    const calls: Array<{ url: string; cookie?: string }> = []
+    let loginIdx = 0
+    const loginMsgs = [
+      "ptuiCB('66','二维码未失效。','')",
+      "ptuiCB('0','登录成功！','https://ssl.ptlogin2.qq.com/check_sig?ptqrtoken=K&uin=9876&ptsigx=SIGAB')",
+    ]
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/ptqrshow')) {
+        return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]) as unknown as BodyInit, {
+          status: 200, headers: { 'set-cookie': 'qrsig=abc123; Path=/' },
+        })
+      }
+      if (url.includes('/ptqrlogin')) return new Response(loginMsgs[Math.min(loginIdx++, 1)], { status: 200 })
+      if (url.includes('/check_sig')) {
+        const h = new Headers()
+        h.append('location', 'https://ssl.ptlogin2.qq.com/login_jump')
+        h.append('set-cookie', 'p_skey=PSKEY123; Path=/')
+        return new Response('', { status: 302, headers: h })
+      }
+      if (url.includes('/oauth2.0/authorize')) {
+        calls.push({ url, cookie: (init?.headers as Record<string, string> | undefined)?.['cookie'] })
+        const h = new Headers()
+        h.append('location', 'https://y.qq.com/portal/wx_redirect.html?code=AUTHCODE123')
+        h.append('set-cookie', 'hop1=H1; Path=/')
+        return new Response('', { status: 302, headers: h })
+      }
+      if (new URL(url).hostname === 'y.qq.com') {
+        calls.push({ url, cookie: (init?.headers as Record<string, string> | undefined)?.['cookie'] })
+        return new Response('', { status: 200 })
+      }
+      if (url.includes('musicu.fcg')) {
+        return new Response(JSON.stringify({ req: { code: 0, data: { musicid: 9876, musickey: 'KEY123' } } }), { status: 200 })
+      }
+      return new Response('', { status: 200 })
+    }) as unknown as typeof fetch
+    const auth = createAuth({ qqClient: createQqClient(fetchMock, { uin: '0' }), fetchImpl: fetchMock, cookiePath: path.join(dir, 'cookie.json') })
+
+    await auth.startQr()
+    const result = await auth.waitForResult(5000)
+    expect(result.ok).toBe(true)
+    expect(calls.length).toBe(2)
+    expect(calls[0].cookie).toContain('p_skey=PSKEY123') // 第一跳带 check_sig 换来的 p_skey
+    expect(calls[1].cookie).toContain('hop1=H1') // 第二跳带上第一跳 Set-Cookie 新种的 hop1
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('已有有效凭证时，重新扫码失败不把状态显示成未登录', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-keep-'))
+    const cookiePath = path.join(dir, 'cookie.json')
+    fs.writeFileSync(cookiePath, JSON.stringify({ uin: 'o123', cookie: 'uin=o123; qqmusic_key=k' }), 'utf-8')
+    const fetchMock = routerFetch({ login: () => "ptuiCB('65','二维码已失效。','')" })
+    const auth = createAuth({ qqClient: createQqClient(fetchMock, { uin: '0' }), fetchImpl: fetchMock, cookiePath })
+    expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o123' })
+    await auth.startQr()
+    expect(await auth.poll()).toBe('expired') // 状态机进入 failed
+    expect(auth.getStatus()).toEqual({ state: 'loggedIn', uin: 'o123' }) // 但旧凭证仍有效 → 不误显示未登录
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
 })
