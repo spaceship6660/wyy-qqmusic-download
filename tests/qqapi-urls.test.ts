@@ -38,6 +38,22 @@ describe('buildCandidates', () => {
     expect(cs[0]).toEqual({ quality: 'flac', filename: 'F000M001.flac' })
     expect(cs[1]).toEqual({ quality: 'flac', filename: 'F000M001M001.flac' })
   })
+
+  it('available 传入时只保留该曲登记的档位（2026-09-27：服务端只认候选首位，混入不存在的档位会整批失败）', () => {
+    const cs = buildCandidates('M001', 'MED001', 'flac', ['128', 'm4a'])
+    expect(cs.map((c) => c.filename)).toEqual([
+      'M500MED001.mp3', 'M500M001M001.mp3', 'C400MED001.m4a', 'C400M001M001.m4a',
+    ])
+    // 该曲有 flac + 320：收窄后首位仍是该曲最高可用档
+    const cs2 = buildCandidates('M001', 'MED001', 'flac', ['flac', '320'])
+    expect(cs2[0]).toEqual({ quality: 'flac', filename: 'F000MED001.flac' })
+    expect(cs2.map((c) => c.quality)).toEqual(['flac', 'flac', '320', '320'])
+  })
+
+  it('available 与降级链无交集时退回全量（不因 sizes 不可信反而下不了）', () => {
+    const cs = buildCandidates('M001', 'MED001', 'm4a', ['flac'])
+    expect(cs.map((c) => c.quality)).toEqual(['m4a', 'm4a'])
+  })
 })
 
 describe('getAudioUrl', () => {
@@ -54,6 +70,15 @@ describe('getAudioUrl', () => {
     expect(body.req_1.param.songmid).toEqual(['M001'])
     expect(body.req_1.param.guid).toMatch(/^\d{5,}$/)
     expect((fetchMock as any).mock.calls.length).toBe(1)
+  })
+
+  it('available 传入时请求体只含该曲登记的档位', async () => {
+    const fetchMock = vi.fn(async () => new Response(fx())) as unknown as typeof fetch
+    await getAudioUrl(createQqClient(fetchMock, { uin: '0' }), 'M001', 'MED001', 'flac', undefined, ['128', 'm4a']).catch(() => {})
+    const body = JSON.parse((fetchMock as any).mock.calls[0][1].body as string)
+    expect(body.req_1.param.filename).toEqual([
+      'M500MED001.mp3', 'M500M001M001.mp3', 'C400MED001.m4a', 'C400M001M001.m4a',
+    ])
   })
 
   it('vkey 的 uin 回传登录账号（去 o 前缀；匿名=0）——VIP 直链按账号核发', async () => {

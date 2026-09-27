@@ -38,6 +38,44 @@ function artistOf(s: any): string {
   return arr.map((x: any) => x?.name ?? '').filter(Boolean).join(' / ') || '未知歌手'
 }
 
+/** VIP/付费曲判定：
+ * - 主依据 `pay.pay_down` > 0（下载需付费/会员）。歌单、我喜欢（CgiGetDiss）、搜索条目都带完整
+ *   pay 对象，2026-09-27 实测确认；
+ * - 次依据仅取 song detail 的 `flags.try_begin`（与改动前一致）。
+ *
+ * **不要用 `file.try_begin`**：免费曲也会带它（实测《我无法用我的语言》pay 全 0、只登记 128k/m4a，
+ * 却有 file.try_begin=95604），拿它判 VIP 会把免费曲误报成会员歌。
+ *
+ * 此前仅 getTrackDetail/getSingleTrack 映射 vip 且只认 flags.try_begin —— 歌单/搜索来源的条目
+ * vip 恒缺，既漏掉 VIP 角标，也让「下载失败点名会员」在歌单来源下永远触发不了。 */
+export function isVipEntry(e: any): boolean {
+  const payDown = Number(e?.pay?.pay_down ?? 0)
+  if (Number.isFinite(payDown) && payDown > 0) return true
+  const flagsTry = Number(e?.flags?.try_begin ?? 0)
+  return Number.isFinite(flagsTry) && flagsTry > 0
+}
+
+/** 该曲实际登记的可下载档位（体积 > 0），按降级链顺序（高→低）。
+ * 用于给 vkey 候选收窄：QQ 服务端只按候选**首位**核发直链，首位档位不存在就整批回空
+ * （2026-09-27 实测，见 qqapi/urls.ts），所以候选只能含该曲真实存在的档位。
+ * 注意不含 ogg（O400/O600，无标签写入器，不在 QUALITY_LADDER 内）。 */
+export function availableTiers(sizes: TrackDetail['sizes'] | undefined): Quality[] {
+  const map: Array<[keyof TrackDetail['sizes'], Quality]> = [
+    ['flac', 'flac'], ['ape', 'ape'], ['mp3_320', '320'], ['mp3_128', '128'], ['m4a', 'm4a'],
+  ]
+  return map.filter(([k]) => Number(sizes?.[k] ?? 0) > 0).map(([, q]) => q)
+}
+
+/** 该曲在服务端登记了哪几档（体积 > 0 视为存在），按高→低拼中文档位名。
+ * 失败报错时回显，用来回答「是不是没自动降级」——多数时候是这首曲子本身就没登记无损/320，
+ * 连通用的低档位服务端也不放行（2026-09-27 实机场景）。 */
+export function describeTierSizes(sizes: TrackDetail['sizes'] | undefined): string {
+  const order: Array<[keyof TrackDetail['sizes'], string]> = [
+    ['flac', '无损 FLAC'], ['ape', 'APE'], ['mp3_320', '320k'], ['mp3_128', '128k'], ['m4a', 'm4a'],
+  ]
+  return order.filter(([k]) => Number(sizes?.[k] ?? 0) > 0).map(([, label]) => label).join(' / ')
+}
+
 export async function searchTracks(client: QqClient, query: string, opts: { limit?: number } = {}): Promise<TrackDTO[]> {
   const list = (await client.postMusicu(searchReq(query, opts.limit ?? 20), {
     path: ['req', 'data', 'body', 'song', 'list'],
@@ -51,6 +89,7 @@ export async function searchTracks(client: QqClient, query: string, opts: { limi
     cover: qqCoverUrl(s),
     mediaMid: s?.file?.media_mid,
     duration: typeof s?.interval === 'number' ? s.interval : undefined,
+    vip: isVipEntry(s),
   }))
 }
 
@@ -102,12 +141,11 @@ export async function getTrackDetail(client: QqClient, mid: string): Promise<Tra
     },
   }, { path: ['info', 'data', 'track_info'] })) as any
   const file = info?.file ?? {}
-  const flags = info?.flags ?? {}
   const t = info?.time_public ?? ''
   return {
     mediaMid: file.media_mid ?? mid,
     date: typeof t === 'string' ? t : '',
-    vip: flags?.try_begin === undefined ? false : flags.try_begin > 0,
+    vip: isVipEntry(info),
     sizes: {
       flac: file.size_flac, ape: file.size_ape,
       mp3_320: file.size_320mp3, mp3_128: file.size_128mp3,
@@ -160,7 +198,7 @@ export async function getSingleTrack(client: QqClient, mid: string): Promise<Tra
     cover: albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albummid}.jpg` : '',
     mediaMid: (info?.file?.media_mid ?? info.mid) as string,
     duration: typeof info?.interval === 'number' ? info.interval : undefined,
-    vip: (info?.flags?.try_begin ?? 0) > 0,
+    vip: isVipEntry(info),
   }
 }
 
@@ -179,6 +217,7 @@ function trackFromEntry(e: any, albumDefault = ''): TrackDTO {
     album: e?.albumname ?? albumDefault ?? '',
     cover: e?.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${e.albummid}.jpg` : '',
     mediaMid: e?.media_mid ?? e?.file?.media_mid,
+    vip: isVipEntry(e),
   }
 }
 

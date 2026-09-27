@@ -56,8 +56,15 @@ async function startServer(delayMs = 0, failFirst: Record<string, number> = {}) 
  *   （postMusicu 路径缺失 → QqApiError）。
  * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
  */
-function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean; neDeadUrl?: boolean }) {
+function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number> }) {
   let vkeyCalls = 0
+  // 该 mock「曲目」登记的档位：由 detailSizes 推出；未指定则视为全档存在（不影响既有用例）
+  const tierOf = (fn: string): string | undefined =>
+    ([['F000', 'flac'], ['A000', 'ape'], ['M800', '320'], ['M500', '128'], ['C400', 'm4a'], ['C200', 'm4a']] as const)
+      .find(([p]) => fn.startsWith(p))?.[1]
+  const tiersOfSizes = (s: Record<string, number>): string[] =>
+    ([['size_flac', 'flac'], ['size_ape', 'ape'], ['size_320mp3', '320'], ['size_128mp3', '128'], ['size_96aac', 'm4a']] as const)
+      .filter(([k]) => (s[k] ?? 0) > 0).map(([, t]) => t)
   const mock = vi.fn(async (input: any, init?: RequestInit) => {
     const url = String(input)
     if (url.includes('musicu.fcg')) {
@@ -89,13 +96,24 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
         vkeyCalls++
         const songmid = body.req_1?.param?.songmid?.[0] ?? 'M'
         const filenames: string[] = body.req_1?.param?.filename ?? ['M800X.mp3']
+        // 忠实模拟真实服务端（2026-09-27 实测）：**只按候选首位核发直链**，首位档位不存在则整批回空。
+        //   [M500(存在), F000(不存在)] → 命中 M500；[M800(不存在), M500(存在)] → 全空。
+        // 旧 mock 给每个 filename 都回 purl，掩盖了「候选混入不存在的档位 → 整批失败」这一真实行为，
+        // 导致「QQ 自动降级从未真正生效」长期未被测试发现。
+        const trackTiers = opts.detailSizes ? tiersOfSizes(opts.detailSizes) : null
+        const firstTier = tierOf(filenames[0] ?? '')
+        const firstServable = !trackTiers || (firstTier !== undefined && trackTiers.includes(firstTier))
         return new Response(
           JSON.stringify({
             req_1: {
               code: 0,
               data: {
                 sip: [`http://127.0.0.1:${opts.port}/`],
-                midurlinfo: filenames.map((filename) => ({ songmid, filename, purl: opts.deadVkey ? '' : (purl || filename) })),
+                midurlinfo: filenames.map((filename, i) => ({
+                  songmid,
+                  filename,
+                  purl: (opts.deadVkey || i > 0 || !firstServable) ? '' : (purl || filename),
+                })),
               },
             },
           }),
@@ -117,13 +135,21 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
                 track_info: {
                   mid: 'M', title: 'T', time_public: '2020-01-01',
                   singer: [{ name: 'X' }], album: { name: 'A' },
-                  file: { media_mid: 'MED' }, flags: {},
+                  file: { media_mid: 'MED', ...(opts.detailSizes ?? {}) }, flags: {},
                 },
               },
             },
           }),
           { status: 200 },
         )
+      }
+      if (body.req?.method === 'GetLoginUserInfo') {
+        // 凭证校验探活：loginExpired 时回业务码 1000（等价 luren-dc LoginAuthExpiredError），
+        // 否则回 code=0 表示会话有效（此时下载失败属「该曲无下载版权/权益」，不该报过期）
+        const payload = opts.loginExpired
+          ? { req: { code: 1000 } }
+          : { req: { code: 0, data: { nickname: 'tester' } } }
+        return new Response(JSON.stringify(payload), { status: 200 })
       }
       if (body.req?.method === 'DoSearchForQQMusicDesktop') {
         // 解密补全用的搜索命中（unlock 用例）
@@ -142,7 +168,7 @@ interface Env {
   dl: string      // 下载目录
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
-  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; failedErrors: string[]; startIds: string[]; failedIds: string[] }
+  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; doneDowngraded: Array<boolean | undefined>; failedErrors: string[]; startIds: string[]; failedIds: string[] }
   fetchMock: ReturnType<typeof vi.fn>
 }
 
@@ -155,7 +181,7 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number> } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
@@ -163,13 +189,13 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
     JSON.stringify({ concurrency: opts.concurrency ?? 2, downloadDir: dl, lyricMode: opts.lyricMode ?? 'none' }),
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0, opts.failFirst ?? {})
-  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey, neDeadUrl: opts.neDeadUrl })
-  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, failedErrors: [] as string[], startIds: [] as string[], failedIds: [] as string[] }
+  const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey, neDeadUrl: opts.neDeadUrl, loginExpired: opts.loginExpired, detailSizes: opts.detailSizes })
+  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, doneDowngraded: [] as Array<boolean | undefined>, failedErrors: [] as string[], startIds: [] as string[], failedIds: [] as string[] }
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
     emitEvent: (ch, payload) => {
-      const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; error?: string }
+      const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; downgraded?: boolean; error?: string }
       if (ch === 'dl:jobStart') {
         events.start++
         events.active++
@@ -181,6 +207,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
         events.active--
         if (p.outputPath) events.donePaths.push(p.outputPath)
         events.doneAnon.push(p.anonFallback)
+        events.doneDowngraded.push(p.downgraded)
       }
       if (ch === 'dl:failed') {
         events.failed++
@@ -239,6 +266,29 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     const out = fs.readFileSync(path.join(env.dl, files[0]))
     expect(out.length).toBeGreaterThan(PAYLOAD.length) // 下载成功并经标签内嵌
     expect((NodeID3.read(path.join(env.dl, files[0])) as any).title).toBe('直链歌')
+  })
+
+  it('I8: 该曲只登记 128k（无无损/320）→ 候选收窄为登记档位，自动降级成功', async () => {
+    // 回归锚（2026-09-27 用户实测《我无法用我的语言》）：服务端只按候选**首位**核发直链，
+    // 旧实现「无损起全量候选」首位是不存在的 flac → 整批回空 → 报错（用户以为是「没做音质回退」）。
+    // 收窄候选到该曲登记的档位后，首位变成真实存在的 128k，降级链路才真正生效。
+    const env = await makeEnv({ detailSizes: { size_flac: 0, size_ape: 0, size_320mp3: 0, size_128mp3: 4444, size_96aac: 3333 } })
+    env.app.enqueue({ tracks: [track('q5', '只有128k')], quality: 'flac', source: 'qq' })
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(env.dl)).toEqual(['只有128k - 同歌手.mp3']) // 扩展名证明降级到 128k mp3
+    expect(env.events.doneDowngraded).toEqual([true]) // 渲染器据此显示「已降级为低品质」
+  })
+
+  it('I9: 候选仍混入不存在的档位时整批失败（服务端只认首位）—— 收窄是必需的，不是可选优化', async () => {
+    // 反向锚：证明 mock 忠实复刻了服务端规则。若哪天 mock 又变回「每个候选都回 purl」，
+    // I8 会在无收窄时也通过，从而失去防回归能力。
+    const env = await makeEnv({ detailBroken: true, detailSizes: { size_flac: 0, size_ape: 0, size_320mp3: 0, size_128mp3: 4444, size_96aac: 3333 } }) // 详情拿不到 → 不收窄 → 全量候选（首位 flac，该曲没有）
+    // 挂上有效凭证：否则失败路径会把「无凭证」判成会话过期，掩盖本用例要验的「全档空」语义
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    env.app.enqueue({ tracks: [track('q4', '全量候选')], quality: 'flac', source: 'qq' })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.events.done).toBe(0)
+    expect(env.events.failedErrors.some((m) => /未拿到可播放/.test(m))).toBe(true)
   })
 
   it('I7: 标签失败 → jobFailed 且已下载文件被清理', async () => {
@@ -457,8 +507,8 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.failedErrors.some((m) => /会员|付费/.test(m) === false && /未拿到可播放/.test(m))).toBe(true)
   })
 
-  it('R4: 账户身份全档空 purl + 探活失败 → 报「登录已过期」，authStatus.sessionExpired=true', async () => {
-    const env = await makeEnv({ deadVkey: true })
+  it('R4: 账户身份全档空 purl + 探活判定过期 → 报「登录已过期」，authStatus.sessionExpired=true', async () => {
+    const env = await makeEnv({ deadVkey: true, loginExpired: true })
     expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
     env.app.enqueue({ tracks: [track('q9', '绿钻歌')], quality: 'flac', source: 'qq' })
     await waitFor(() => env.events.failed >= 1)
@@ -466,6 +516,36 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     // 重新导入凭证清标记
     expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
     expect(env.app.authStatus().sessionExpired).toBe(false)
+  })
+
+  it('R4b: 凭证有效的全档空 purl → 不误报过期（保留「无版权/权益不足」语义）', async () => {
+    // 回归锚：探活必须走 GetLoginUserInfo（令牌依赖型）。若改回 GetPlaylistByUin 之类
+    // EncryptUin 依赖型业务接口，本用例在真实服务端会变成「密钥已失效却判存活」——
+    // 这里用 loginExpired:false 的 mock 固定「有效凭证不报过期」这一半语义。
+    const env = await makeEnv({ deadVkey: true })
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    env.app.enqueue({ tracks: [track('q8', '无版权歌')], quality: 'flac', source: 'qq' })
+    await waitFor(() => env.events.failed >= 1)
+    expect(env.app.authStatus().sessionExpired).toBe(false)
+    expect(env.events.failedErrors.some((m) => /未拿到可播放/.test(m))).toBe(true)
+    expect(env.events.failedErrors.some((m) => /登录已过期/.test(m))).toBe(false)
+    // 失败文案回显该曲实际登记档位（说明「不是没降级，是这曲没登记档位/服务端不放行」）
+    // mock 详情 file 只有 media_mid、无各档体积 → 显示「无」
+    expect(env.events.failedErrors.some((m) => /登记的档位：无/.test(m))).toBe(true)
+  })
+
+  it('R8: QQ 会员/付费曲无直链 + 会话有效 → 点名会员/付费；普通歌仍走通用文案', async () => {
+    const env = await makeEnv({ deadVkey: true })
+    expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
+    env.app.enqueue({
+      tracks: [{ ...track('q7', '会员歌'), vip: true }, track('q6', '普通歌')],
+      quality: 'flac',
+      source: 'qq',
+    })
+    await waitFor(() => env.events.failed >= 2)
+    expect(env.events.failedErrors.length).toBe(2)
+    expect(env.events.failedErrors.some((m) => /会员|付费/.test(m))).toBe(true)
+    expect(env.events.failedErrors.some((m) => !/会员|付费/.test(m) && /未拿到可播放/.test(m))).toBe(true)
   })
 
   it('R3: QQ 下载身份切换——账户态 vkey 带 cookie，匿名态不带', async () => {

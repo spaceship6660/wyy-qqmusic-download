@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl, searchAlbums } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl, searchAlbums, isVipEntry, describeTierSizes } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -25,7 +25,7 @@ function routedFetch(): typeof fetch {
 }
 
 describe('搜索', () => {
-  it('解析成 TrackDTO（多歌手合并/封面/VIP 字段缺省）', async () => {
+  it('解析成 TrackDTO（多歌手合并/封面/VIP 字段）', async () => {
     const client = createQqClient(routedFetch(), { uin: '0' })
     const tracks = await searchTracks(client, '天空之城', { limit: 10 })
     expect(tracks.length).toBeGreaterThan(0)
@@ -34,9 +34,46 @@ describe('搜索', () => {
     expect(t.artist).toBeTypeOf('string')
     expect(t.cover).toContain('http')
     expect(tracks[1].artist).toBe('南征北战NZBZ / 白勺啊白')
-    expect(tracks[0].vip).toBeUndefined()
+    expect(tracks[0].vip).toBe(false) // fixture 无 try_begin / pay.pay_down → 非 VIP
     expect(tracks[0].duration).toBeTypeOf('number')
     expect(tracks[3].artist).toBe('未知歌手')
+  })
+})
+
+describe('VIP/付费判定（isVipEntry）', () => {
+  it('pay.pay_down>0 判 VIP（歌单/我喜欢条目的主要依据）', () => {
+    // 2026-09-27 实测：CgiGetDiss 的 songlist 条目带完整 pay 对象
+    expect(isVipEntry({ pay: { pay_down: 1, pay_month: 1, price_track: 0 } })).toBe(true)
+    expect(isVipEntry({ pay: { pay_down: 0, pay_month: 0 } })).toBe(false)
+  })
+
+  it('song detail 的 flags.try_begin>0 判 VIP', () => {
+    expect(isVipEntry({ flags: { try_begin: 1 } })).toBe(true)
+    expect(isVipEntry({ flags: { try_begin: 0 } })).toBe(false)
+  })
+
+  it('file.try_begin 不参与判定（免费曲也带它 → 曾会把免费曲误报成会员歌）', () => {
+    // 回归锚：实测《我无法用我的语言》pay 全 0、只登记 128k/m4a，却带 file.try_begin=95604
+    expect(isVipEntry({ file: { try_begin: 95604 }, pay: { pay_down: 0 } })).toBe(false)
+  })
+
+  it('字段缺失/非法一律 false（不误报）', () => {
+    expect(isVipEntry({})).toBe(false)
+    expect(isVipEntry(undefined)).toBe(false)
+    expect(isVipEntry({ file: {}, pay: {} })).toBe(false)
+    expect(isVipEntry({ flags: { try_begin: 'x' } })).toBe(false)
+  })
+})
+
+describe('档位回显（describeTierSizes）', () => {
+  it('只列体积 > 0 的档位，按高→低', () => {
+    expect(describeTierSizes({ flac: 100, ape: 0, mp3_320: 0, mp3_128: 4459842, m4a: 3403915 }))
+      .toBe('无损 FLAC / 128k / m4a')
+  })
+
+  it('全为 0 / 缺失 → 空串（调用方据此显示「无」）', () => {
+    expect(describeTierSizes({ flac: 0, ape: 0, mp3_320: 0, mp3_128: 0, m4a: 0 })).toBe('')
+    expect(describeTierSizes(undefined)).toBe('')
   })
 })
 

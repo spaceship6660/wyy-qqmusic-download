@@ -1,9 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, searchAlbums, TrackDTO, Quality } from './qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, searchAlbums, describeTierSizes, availableTiers, TrackDTO, TrackDetail, Quality } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { getUserPlaylists, getFavPlaylists, getDissTracksPage } from './qqapi/playlists'
+import { getLoginUserInfo, isQqLoginExpired } from './qqapi/user'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
 import type { NeClient } from './neteaseapi/client'
@@ -90,15 +91,25 @@ export function createApp(deps: AppDeps) {
     job: DownloadJob,
     report: (pct: number) => void,
     spec: {
-      resolveOnce: (q: Quality) => Promise<{ url: string; quality: Quality; downgraded: boolean }>
+      resolveOnce: (q: Quality, available?: Quality[]) => Promise<{ url: string; quality: Quality; downgraded: boolean }>
       extFor: (q: Quality) => string
-      fetchDetail: () => Promise<{ date: string }>
+      fetchDetail: () => Promise<{ date: string; sizes?: TrackDetail['sizes'] }>
       fetchLyrics: () => Promise<string>
     },
     signal?: AbortSignal,
   ): Promise<{ outputPath: string }> {
+    // 0) 详情**先取**：QQ 服务端只按候选首位核发直链，故候选必须按该曲实际登记的档位收窄
+    //    （见 qqapi/urls.ts），而登记档位来自详情。详情在旧流程里本就要取（标签元数据步），
+    //    这里提前并复用 → 全程仍只 1 次请求。详情失败不阻塞：available 传 undefined 退回旧行为。
+    let detail: { date: string; sizes?: TrackDetail['sizes'] } | null = null
+    try {
+      detail = await spec.fetchDetail()
+    } catch {
+      detail = null
+    }
+    const available = availableTiers(detail?.sizes)
     // 1) 直链（约 20 分钟过期；下载失败重取一次）
-    const first = await spec.resolveOnce(job.quality)
+    const first = await spec.resolveOnce(job.quality, available)
     if (first.downgraded) job.downgraded = true
     // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
     //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
@@ -134,7 +145,7 @@ export function createApp(deps: AppDeps) {
       if (signal?.aborted) throw e
       // catch-all 重取直链重下；无论档位是否变化都重新占位——rmSync 后 dest 在 await 期间
       // 已失去 wx 保护，并发同名任务可能用 uniquePath 抢走同名（check-then-write）
-      const fresh = await spec.resolveOnce(job.quality)
+      const fresh = await spec.resolveOnce(job.quality, available)
       if (fresh.downgraded) job.downgraded = true
       ext = spec.extFor(fresh.quality)
       dest = reserveDest(ext)
@@ -158,14 +169,15 @@ export function createApp(deps: AppDeps) {
     try {
       const lyrics = lyricMode === 'none' ? '' : await spec.fetchLyrics()
       if (canTag) {
-        const detail = await spec.fetchDetail()
+        // 复用步骤 0 取到的详情；若当时失败（detail=null）在这里重试一次，保持原「详情拿不到就判失败」语义
+        const info = detail ?? (await spec.fetchDetail())
         const cover = await fetchCover(job.track.cover, fetchImpl, signal)
         const embedLyrics = lyricMode === 'both' || lyricMode === 'embed'
         const meta = {
           title: job.track.name,
           artist: job.track.artist,
           album: job.track.album || '未知专辑',
-          date: detail.date,
+          date: info.date,
           copyright: '',
           genre: '',
           lyrics: embedLyrics ? lyrics : '',
@@ -196,20 +208,25 @@ export function createApp(deps: AppDeps) {
     const s = auth.getStatus()
     const uin = s.uin?.replace(/^o/i, '') ?? ''
     if (!uin) return false
-    // 探测接口：GetPlaylistByUin 需登录态；空响应（风控）判不了——重试一次，仍空则按“未知”不置失效
+    // 探测接口：music.UserInfo.userInfoServer/GetLoginUserInfo —— 令牌依赖型，会话失效必报业务码
+    // （1000/104400/104401）。**不要改回 GetPlaylistByUin 之类业务接口**：那些走 EncryptUin
+    // （账号标识，不随会话密钥过期），密钥死了照样成功，会把过期误判成存活 → 直链全档空却不提示重新登录
+    // （2026-09-27 实机故障根因，见 qqapi/user.ts 注释）。
     for (let i = 0; i < 2; i++) {
       try {
-        await getUserPlaylists(client, uin)
+        await getLoginUserInfo(client)
         return true
       } catch (e) {
+        if (isQqLoginExpired(e)) return false
+        // 风控空响应/路径缺失（接口改版）等——判不了，不置失效（避免误报过期把用户赶去重扫码）
         const msg = e instanceof Error ? e.message : String(e)
-        const transient = /rate-limited|空响应|timeout|fetch failed|network/i.test(msg)
+        const transient = /rate-limited|空响应|timeout|fetch failed|network|路径缺失/i.test(msg)
         if (transient && i === 0) {
           await new Promise((r) => setTimeout(r, 1200))
           continue
         }
-        if (transient) return true // 判不了，别误报过期
-        return false
+        dbgFile?.(`QQ 探活未定论（保留原「无版权/权益」语义）：${msg}`)
+        return true
       }
     }
     return true
@@ -223,9 +240,31 @@ export function createApp(deps: AppDeps) {
       if (job.source === 'netease') return runNeteaseJob(job, report, signal)
       // 下载身份：匿名时直链/详情/歌词全走无凭证 client（歌单浏览不受影响，仍用登录态）
       const qc = settings.qqIdentity === 'anon' ? anonQqClient : client
+      // 失败报错定性（账户身份、凭证已确认有效时）：
+      // 1) 会员/付费曲点名权益问题，而非丢通用文案；
+      // 2) 非会员曲则明确「服务端未提供任何档位直链、与所选档位无关」，并回显该曲实际登记的档位。
+      //    起因（2026-09-27 实机）：用户选了无损、曲子只登记 128k/m4a 且 128k 也被拒，
+      //    旧文案「可能需要登录，或账号权益不足，无损需绿钻权益」让人误以为「没做音质回退」。
+      // 仅失败路径取一次详情（成功路径零额外请求）；详情失败则不带档位信息，不影响报错本身。
+      const qqNoUrlError = async (e: unknown): Promise<unknown> => {
+        if (!(e instanceof Error) || !/未拿到可播放/.test(e.message)) return e
+        let detailNote = ''
+        try {
+          const d = await getTrackDetail(qc, job.track.id)
+          detailNote = `；该曲服务端登记的档位：${describeTierSizes(d.sizes) || '无'}`
+        } catch {
+          // 详情取不到：不带附加信息
+        }
+        if (job.track.vip) {
+          return new Error(`付费/会员歌曲下载不了：当前账号无该曲下载权限（需 QQ 音乐绿钻/豪华绿钻或单独购买）${detailNote}`)
+        }
+        return new Error(
+          `该曲未拿到可播放 URL：服务端未提供任何档位的下载直链（与所选档位无关，多因版权方未开放下载、仅授权在线试听）${detailNote}`,
+        )
+      }
       try {
         const r = await runDownloadJob(job, report, {
-          resolveOnce: (q) => getAudioUrl(qc, job.track.id, job.track.mediaMid, q, dbgFile),
+          resolveOnce: (q, available) => getAudioUrl(qc, job.track.id, job.track.mediaMid, q, dbgFile, available),
           extFor: (q) => QUALITY_MAP[q].ext,
           fetchDetail: () => getTrackDetail(qc, job.track.id),
           fetchLyrics: () => fetchLyric(qc, job.track.id),
@@ -240,7 +279,7 @@ export function createApp(deps: AppDeps) {
           if (qqSessionExpired) {
             throw new Error('QQ 登录已过期（接口已失效，故直链取不到）。请在左下角重新登录后重试')
           }
-          if (Date.now() - qqSessionAliveAt < QQ_SESSION_PROBE_TTL_MS) throw e // 刚探活过：保留原“无版权/权益不足”语义
+          if (Date.now() - qqSessionAliveAt < QQ_SESSION_PROBE_TTL_MS) throw await qqNoUrlError(e) // 刚探活过：保留原“无版权/权益不足”语义
           const alive = await qqSessionAlive()
           if (!alive) {
             qqSessionExpired = true
@@ -248,7 +287,7 @@ export function createApp(deps: AppDeps) {
           }
           qqSessionAliveAt = Date.now()
         }
-        throw e
+        throw await qqNoUrlError(e)
       }
     },
   })
