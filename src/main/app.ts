@@ -12,6 +12,7 @@ import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount
 import { neFetchLyric } from './neteaseapi/lyric'
 import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
+import { cdnFallbackUrls } from './neteaseapi/cdn'
 import { createNeAuth } from './neteaseAuth'
 import { DownloadQueue, DownloadJob } from './downloader/queue'
 import { RateLimiter } from './downloader/ratelimit'
@@ -28,6 +29,9 @@ export interface AppDeps {
   emitEvent?: (channel: string, payload: unknown) => void  // 队列事件转发到渲染器
   /** 诊断：非空时把 QQ 登录各网络步响应摘要追加到该文件（仅排障用，正常不设） */
   debugLogFile?: string
+  /** 网易云 403 时的同 URL 备用节点候选生成器（默认 cdnFallbackUrls）。
+   *  网易云会轮换 CDN 节点，留出「不改码即可调整节点表」的口子；测试亦用它注入本地端点。 */
+  neCdnFallbackUrls?: (url: string) => string[]
 }
 
 /** 封面 mime 按魔数嗅探（T8 评审项：不硬编码 jpeg；PNG 89 50 4E 47 / JPEG FF D8 FF） */
@@ -54,6 +58,8 @@ export function createApp(deps: AppDeps) {
   const auth = createAuth({ qqClient: client, fetchImpl, cookiePath: cookieFile, debugLogFile: deps.debugLogFile })
   const neClient = createNeClient(fetchImpl)
   const anonNeClient = createNeClient(fetchImpl) // 同上：匿名下载专用，永不挂 MUSIC_U
+  // 403 换节点候选生成器（默认真实节点表；deps 覆盖点见 AppDeps 注释）
+  const neCdnFallbackUrls = deps.neCdnFallbackUrls ?? cdnFallbackUrls
   const neAuth = createNeAuth({ cookiePath: path.join(deps.userDataDir, 'netease_cookie.json') })
   const savedNe = neAuth.getCookie()
   if (savedNe) neClient.setCookie(savedNe)
@@ -95,6 +101,9 @@ export function createApp(deps: AppDeps) {
       extFor: (q: Quality) => string
       fetchDetail: () => Promise<{ date: string; sizes?: TrackDetail['sizes'] }>
       fetchLyrics: () => Promise<string>
+      /** 可选：直链被 CDN 拒收（403）时的同 URL 备用节点候选（换 host，路径与签名不变）。
+       *  网易云传 cdnFallbackUrls；QQ 无此机制则不传（旧行为完全不变）。 */
+      altCdnUrls?: (url: string) => string[]
     },
     signal?: AbortSignal,
   ): Promise<{ outputPath: string }> {
@@ -136,9 +145,15 @@ export function createApp(deps: AppDeps) {
       onProgress: (got, total) => {
         report(total > 0 ? Math.round((got / total) * 100) : Math.min(99, Math.round(got / 1e6)))
       },
+      altUrls: spec.altCdnUrls,
     })
+    // 403 换节点成功只记诊断日志：同一串签名、同一身份、同一音质，产物性质未变，用户无需被告知；
+    // 真正要给用户看的是「降级」与「改匿名」——那两条才改变了产物的音质或身份（见 runNeteaseJob）。
+    const noteCdnSwitch = (r: { cdnSwitched: boolean }): void => {
+      if (r.cdnSwitched) dbgFile?.(`${job.source} 下载 ${job.track.id}：直链被 CDN 节点拒收（403），换节点重试成功`)
+    }
     try {
-      await doDownload(first.url, dest)
+      noteCdnSwitch(await doDownload(first.url, dest))
     } catch (e) {
       // 先清占位/半成品：取消时占位不能留（否则同名歌曲下次下载变成 Name(1)）
       fs.rmSync(dest, { force: true })
@@ -151,7 +166,7 @@ export function createApp(deps: AppDeps) {
       dest = reserveDest(ext)
       lrcPath = dest.slice(0, -(ext.length + 1)) + '.lrc'
       try {
-        await doDownload(fresh.url, dest)
+        noteCdnSwitch(await doDownload(fresh.url, dest))
       } catch (e2) {
         fs.rmSync(dest, { force: true })
         throw e2
@@ -302,8 +317,11 @@ export function createApp(deps: AppDeps) {
 
   // 网易云 wrapper：ID 校验（netease 接口以数值 id 查询，非数值直接失败，不进下载），
   // 其余差异仅三个参数化点（直链 br 逐档降级 / 扩展名 / 元数据），复用共享骨架。
-  // 账户 403 兜底：登录态拿到的直链若被 CDN 拒收（个别账号会被限制下载，匿名反而正常），
-  // 自动改走匿名重下一遍并标记 anonFallback（只追加一次尝试，不循环）。
+  // 账户 403 处置顺序（2026-10-01 修正）：下载内先做**同 URL 换 CDN 节点**重试（altCdnUrls），
+  // 全部节点仍 403 才在这里改走匿名重下一遍并标记 anonFallback（只追加一次尝试，不循环）。
+  // 起因：账号态直链常被发到 m704/m804 这类恒定 403 的节点上，而同一串 URL 换 m701/m801/m802
+  // 立即可下（见 neteaseapi/cdn.ts 实测）。旧逻辑没有换节点这一步，一遇 403 就切匿名——
+  // 看似总能成功，实则每首都丢账号身份、且因匿名拿不到无损而顺带降级，用户只看到「全转匿名」。
   // 会员提示：付费/会员歌曲拿不到直链时，报错点名为身份问题而非通用文案（有会员登录态能下则不受影响）。
   const runNeteaseJob = async (job: DownloadJob, report: (pct: number) => void, signal?: AbortSignal): Promise<{ outputPath?: string } | void> => {
     const id = Number(job.track.id)
@@ -320,6 +338,7 @@ export function createApp(deps: AppDeps) {
       extFor: (q) => (q === 'flac' ? 'flac' : 'mp3'),
       fetchDetail: () => neGetTrackDetail(nc, id),
       fetchLyrics: () => neFetchLyric(nc, id),
+      altCdnUrls: (u) => neCdnFallbackUrls(u),
     }, signal)
     if (settings.neIdentity === 'anon') {
       try {
@@ -333,7 +352,7 @@ export function createApp(deps: AppDeps) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (!/HTTP 403/.test(msg)) throw vipify(e)
-      dbgFile?.(`ne 下载 ${id}：账户直链 403，改走匿名重试一次`)
+      dbgFile?.(`ne 下载 ${id}：账户直链 403（备用 CDN 节点均已试过），改走匿名重试一次`)
       job.anonFallback = true
       try {
         return await runWith(anonNeClient)

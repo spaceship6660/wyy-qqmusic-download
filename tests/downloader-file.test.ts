@@ -151,4 +151,68 @@ describe('downloadFile', () => {
     expect(fs.existsSync(dest)).toBe(false)
     server.close(); fs.rmSync(dir, { recursive: true, force: true })
   })
+
+  it('403 → 换 CDN 节点候选重试成功：返回 cdnSwitched=true 且产物完整（不触发 404/重取直链）', async () => {
+    // 模拟实测现场：/被拒节点 恒 403，/可用节点 200。两条 URL 除 host 外完全相同。
+    const payload = Buffer.from('flac-from-other-node'.repeat(50))
+    const requested: string[] = []
+    const server = http.createServer((req, res) => {
+      requested.push(req.url ?? '')
+      if ((req.url ?? '').startsWith('/bad')) { res.writeHead(403); res.end(); return }
+      res.writeHead(200, { 'content-length': String(payload.length) })
+      res.end(payload)
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as any).port
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dl9-'))
+    const dest = path.join(dir, 'out.mp3')
+    const r = await downloadFile(`http://127.0.0.1:${port}/bad/a.flac?authSecret=s`, dest, {
+      retries: 2,
+      altUrls: () => [`http://127.0.0.1:${port}/good/a.flac?authSecret=s`],
+    })
+    expect(r.cdnSwitched).toBe(true)
+    expect(r.size).toBe(payload.length)
+    expect(fs.readFileSync(dest)).toEqual(payload)
+    expect(fs.existsSync(dest + '.part')).toBe(false)
+    expect(requested).toEqual(['/bad/a.flac?authSecret=s', '/good/a.flac?authSecret=s']) // 403 不重试，直接换节点
+    server.close(); fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('403 且所有候选节点也不可用 → 抛回原始 403（上层 /HTTP 403/ 兜底判据不变）', async () => {
+    const requested: string[] = []
+    const server = http.createServer((req, res) => {
+      requested.push(req.url ?? '')
+      res.writeHead(403); res.end()
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as any).port
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dl10-'))
+    const dest = path.join(dir, 'out.mp3')
+    const alts = [`http://127.0.0.1:${port}/n1`, `http://127.0.0.1:${port}/n2`]
+    const err = (await downloadFile(`http://127.0.0.1:${port}/origin`, dest, {
+      retries: 2,
+      altUrls: () => alts,
+    }).catch((e) => e)) as DownloadHttpError
+    expect(err.status).toBe(403)
+    expect(err.message).toBe('HTTP 403')
+    // 原始 1 次 + 每个候选各 1 次（候选不各自重试，避免 403 场景请求数爆炸）
+    expect(requested).toEqual(['/origin', '/n1', '/n2'])
+    expect(fs.existsSync(dest)).toBe(false)
+    server.close(); fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('非 403 失败不触发换节点（候选生成器不被调用）', async () => {
+    const server = http.createServer((_req, res) => { res.writeHead(500); res.end() })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as any).port
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dl11-'))
+    const dest = path.join(dir, 'out.mp3')
+    let calls = 0
+    await expect(downloadFile(`http://127.0.0.1:${port}/x.mp3`, dest, {
+      retries: 0,
+      altUrls: () => { calls++; return [] },
+    })).rejects.toThrow(/HTTP 500/)
+    expect(calls).toBe(0)
+    server.close(); fs.rmSync(dir, { recursive: true, force: true })
+  })
 })

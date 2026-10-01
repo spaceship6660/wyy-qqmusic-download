@@ -2,9 +2,17 @@ import { QqApiError } from '../qqapi/client'
 import type { Quality } from '../qqapi/tracks'
 import type { NeClient } from './client'
 
-// 网易云 br 档位：0=无损(flac)、320000、128000。ape/m4a 无对应档位。
+// 网易云 br 档位：999000=无损(flac)、320000、128000。ape/m4a 无对应档位。
 // 端点与 Creamplayer utils/api.ts 同款（参考 docs/netease-download-research-2026-09-04.md §2 实测）。
-export const NE_QUALITY_BR: Partial<Record<Quality, number>> = { flac: 0, '320': 320000, '128': 128000 }
+//
+// 2026-10-01 实测修正：无损档**必须**用 br=999000。此前写 0（沿用「0=无损」的说法）时，
+// 该端点恒返回 `code:200 / url:null`——即使账号是有效会员也一样，于是无损请求必然落空、
+// 每一首都降级到 320k，还白打一次废请求。带会员 cookie 实测：
+//   br=0      → code 200，url 空
+//   br=999000 → br=1065126、size≈31MB，内容 magic=`fLaC`
+// （`/api/song/enhance/player/url/v1?level=lossless&encodeType=flac` 亦可，此处保持老端点最小改动。）
+// 无该档权益时服务端会回该曲实际可给的最高档，故「先问最高档」不损失降级能力。
+export const NE_QUALITY_BR: Partial<Record<Quality, number>> = { flac: 999000, '320': 320000, '128': 128000 }
 export const NE_LADDER: Quality[] = ['flac', '320', '128']
 
 export interface NeAudioUrlResult { url: string; quality: Quality; downgraded: boolean }

@@ -181,7 +181,7 @@ afterEach(() => {
   }
 })
 
-async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number> } = {}): Promise<Env> {
+async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number>; neCdnFallbackUrls?: (url: string) => string[] } = {}): Promise<Env> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'app-t10-'))
   const dl = path.join(dir, 'dl')
   fs.writeFileSync(
@@ -194,6 +194,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
+    neCdnFallbackUrls: opts.neCdnFallbackUrls,
     emitEvent: (ch, payload) => {
       const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; downgraded?: boolean; error?: string }
       if (ch === 'dl:jobStart') {
@@ -489,6 +490,32 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.done).toBe(0)
     // 账户（初下 + 重取直链再下）+ 匿名（初下 + 重取直链再下）= 4 次
     expect(env.recorded).toEqual(['/ne.mp3', '/ne.mp3', '/ne.mp3', '/ne.mp3'])
+  })
+
+  it('R5b: 账户直链 403 先换 CDN 节点成功 → 保住账户身份（不切匿名、不降级）', async () => {
+    // 实机故障锚（2026-10-01）：账号态直链常落在 m704/m804 这类恒 403 节点上，
+    // 同一串 URL 换节点即可 206。换节点成功就该止步于此——一旦切匿名，就拿不到无损了。
+    // env 自带 server 扮演「被拒节点」（failFirst 全拒），另起一个 server 扮演「可用节点」。
+    const good = await startServer()
+    try {
+      const env = await makeEnv({
+        failFirst: { '/ne.mp3': 99 },
+        neCdnFallbackUrls: () => [`http://127.0.0.1:${good.port}/ne.mp3`],
+      })
+      env.app.enqueue({
+        tracks: [{ id: '123', name: '换节点歌', artist: '手', album: '', cover: '' }],
+        quality: '320',
+        source: 'netease',
+      })
+      await waitFor(() => env.events.done >= 1)
+      expect(env.events.failed).toBe(0)
+      expect(env.events.doneAnon).toEqual([undefined]) // 未走匿名兜底
+      expect(env.recorded).toEqual(['/ne.mp3']) // 被拒节点只打一次（403 不重试、也不再兜底重下）
+      expect(good.recorded).toEqual(['/ne.mp3']) // 换节点后一次命中
+      expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3')).length).toBe(1)
+    } finally {
+      good.server.close()
+    }
   })
 
   it('R7: 会员歌曲无直链 → 点名会员/付费（而非通用文案）；普通歌仍走通用文案', async () => {

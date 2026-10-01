@@ -200,6 +200,63 @@ Python 下载器 (resources/musicdownloader.py, 201 行)
 
 ---
 
+## 7. 2026-10-01 实测修正（v0.6.1）：无损档参数与 CDN 节点拒收
+
+用户报障「我有网易云会员，为啥全给我转匿名通道了」（每首歌都显示「已降级为低品质 + 已切匿名下载」）。
+诊断入口：`%APPDATA%\qq-music-downloader\qq-login-diag.log`（308 条 ne 记录全部同一模式），
+外加带/不带 cookie 的受控对照请求。结论是**两个独立缺陷**，与会员权益无关。
+
+### 7.1 现象成因链
+
+```
+账户态请求直链 → 服务端下发 m704/m804 + authSecret → 该节点恒定 403
+  → file.ts 抛 DownloadHttpError('HTTP 403') → app.ts /HTTP 403/ 兜底 → job.anonFallback=true
+  → 匿名重下命中 m701/m801 → 成功
+```
+
+于是每一首都「已切匿名下载」；同时因 `br=0` 拿不到无损而叠加「已降级为低品质」。
+
+### 7.2 事实一：直链形态因「请求是否带 cookie」而分叉
+
+同曲同 br、同一端点，唯一变量是有无 `MUSIC_U`：
+
+| | 账号态（带 cookie） | 匿名态 |
+|---|---|---|
+| 节点 | `m704/m804.music.126.net` | `m701/m801.music.126.net` |
+| 查询串 | 多出 `authSecret` | 无 |
+| 取首字节 | **HTTP 403**（3/3 复现，恒落同节点） | HTTP 206 |
+
+- 与请求头无关：裸 `fetch` / UA+Referer / 补 Cookie **全 403**；与 http/https 无关。
+- **重取直链仍是同一节点** → 「403 就重取直链」对这类故障完全无效。
+- **同一串 URL 只换 host 到 m701/m801/m802 → HTTP 206**，内容校验：无损 magic=`fLaC`、
+  320 档 magic=`ID3\x04`、`Content-Range` 总长与 `size` 一致。
+- ⇒ 403 是 **CDN 节点级拒收**，不是签名失效、不是权益问题、不是会员过期。
+
+### 7.3 事实二：无损档必须 `br=999000`，写 `0` 恒空
+
+| 请求 | 响应 |
+|---|---|
+| `br=0`（旧实现 `NE_QUALITY_BR.flac`） | `code:200`，`url:null`（**会员账号也一样**） |
+| `br=999000` | `br:1065126`、`size:31076605`（≈31MB 真 flac） |
+| `br=999000` **匿名** | 只回 `br:320000` |
+
+`/api/song/enhance/player/url/v1?level=lossless&encodeType=flac` 亦可得无损（本次保持老端点最小改动）。
+另：`br=0` 每首还白打一次请求。
+
+### 7.4 修复
+
+1. `neteaseapi/urls.ts`：`flac` 档 `0 → 999000`。
+2. 新增 `neteaseapi/cdn.ts`：`NE_CDN_NODES`（m701/m801/m802）+ `cdnFallbackUrls()`（同 URL 换 host，
+   路径与查询串含 `authSecret` 一字不改；非 `mNNN.music.126.net` 主机名回空）。
+3. `downloader/file.ts`：`DownloadOptions.altUrls` —— 仅当首个 URL 抛 **403** 时依次试候选节点，
+   每个候选只试一次；全部失败抛回**原始 403**（上层兜底判据不变）。返回 `cdnSwitched`。
+4. `app.ts`：网易云 `runWith` 传 `altCdnUrls`（默认 `cdnFallbackUrls`，`AppDeps.neCdnFallbackUrls` 可覆盖）；
+   换节点成功只写诊断日志（同签名同身份同音质，产物性质未变，无需打扰用户），
+   全部节点失败才走匿名兜底。
+
+验收：单测 26 文件 / 223 用例全绿；真实网络冒烟（跑完即删）确认
+「账号态 m804 → 403；m701/m801/m802 三个候选全部 206 且 magic=`fLaC`；匿名无损档只回 320k」。
+
 ## 附录 A：实测命令记录（2026-09-03）
 
 ```bash

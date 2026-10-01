@@ -2,10 +2,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { createNeClient } from '../src/main/neteaseapi/client'
 import { NE_QUALITY_BR, NE_LADDER, neGetAudioUrl } from '../src/main/neteaseapi/urls'
 
-function urlFetch(script: Array<{ url: string | null; br: number }>): typeof fetch {
+function urlFetch(script: Array<{ url: string | null; br: number }>, sink?: string[]): typeof fetch {
   let i = 0
   return vi.fn(async (input: any) => {
     const u = String(input)
+    if (sink) sink.push(u)
     if (!u.includes('/api/song/enhance/player/url')) return new Response('{}')
     const s = script[Math.min(i++, script.length - 1)] ?? script[script.length - 1]
     const data = s.url
@@ -17,7 +18,9 @@ function urlFetch(script: Array<{ url: string | null; br: number }>): typeof fet
 
 describe('NE_QUALITY_BR / NE_LADDER', () => {
   it('三档映射与降级顺序', () => {
-    expect(NE_QUALITY_BR.flac).toBe(0)
+    // 2026-10-01 实测修正：无损档必须用 999000。写 0 时该端点恒回 code=200/url=null，
+    // 即使账号是有效会员也拿不到无损 → 每首都降级到 320k（实机「已降级为低品质」根因之一）。
+    expect(NE_QUALITY_BR.flac).toBe(999000)
     expect(NE_QUALITY_BR['320']).toBe(320000)
     expect(NE_QUALITY_BR['128']).toBe(128000)
     expect(NE_LADDER).toEqual(['flac', '320', '128'])
@@ -25,6 +28,22 @@ describe('NE_QUALITY_BR / NE_LADDER', () => {
 })
 
 describe('neGetAudioUrl', () => {
+  it('无损档按 br=999000 请求（回归锚：不得改回 0）', async () => {
+    const requested: string[] = []
+    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/a.flac', br: 1065126 }], requested))
+    const r = await neGetAudioUrl(client, 103027, 'flac')
+    expect(requested.length).toBe(1) // 一次命中，不再先打一次空请求
+    expect(requested[0]).toContain('br=999000')
+    expect(r.quality).toBe('flac')
+    expect(r.downgraded).toBe(false) // 真无损到手 → 不得标降级
+  })
+
+  it('320 档仍按 br=320000 请求（改无损参数不得影响其他档）', async () => {
+    const requested: string[] = []
+    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/a.mp3', br: 320000 }], requested))
+    await neGetAudioUrl(client, 103027, '320')
+    expect(requested[0]).toContain('br=320000')
+  })
   it('320 直接命中', async () => {
     const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/1.mp3?x=1', br: 320000 }]))
     const r = await neGetAudioUrl(client, 103027, '320')
