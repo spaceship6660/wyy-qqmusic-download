@@ -32,7 +32,7 @@ export async function neGetAudioUrl(
   debug?: (line: string) => void,
 ): Promise<NeAudioUrlResult> {
   // ape/m4a 在网易云没有对应 br 档，但它们表达的是「用户想要尽可能高的音质」，
-  // 所以起跳点取降级链首位（无损）。旧实现写 startIdx=1（从 320 起），等于
+  // 所以起跳点取降级链首位（无损）。旧实现把起跳点写死为 1（即从 320k 开始），等于
   // 「选了 APE 就对整张网易云歌单放弃无损」——2026-10-06 实机三首全标「已降级」的根因。
   const supported = NE_QUALITY_BR[preferred] !== undefined
   const targetIdx = supported ? NE_LADDER.indexOf(preferred) : 0

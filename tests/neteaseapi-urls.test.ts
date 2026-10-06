@@ -24,6 +24,9 @@ describe('NE_QUALITY_BR / NE_LADDER', () => {
     expect(NE_QUALITY_BR['320']).toBe(320000)
     expect(NE_QUALITY_BR['128']).toBe(128000)
     expect(NE_LADDER).toEqual(['flac', '320', '128'])
+    // 两表必须同集：进了 br 表没进降级链 → indexOf 得 -1 → 首轮打出 br=undefined 的废请求且 downgraded 恒真。
+    // 用集合比较而非顺序比较：Object.keys 会把 '128'/'320' 当整数索引排在最前。
+    for (const k of Object.keys(NE_QUALITY_BR)) expect(NE_LADDER).toContain(k)
   })
 })
 
@@ -85,11 +88,13 @@ describe('neGetAudioUrl', () => {
   })
 
   it('ape 无损拿不到 → 降 320 且标降级', async () => {
+    const requested: string[] = []
     const client = createNeClient(urlFetch([
       { url: null, br: 0 },
       { url: 'https://m10.music.126.net/320.mp3', br: 320000 },
-    ]))
+    ], requested))
     const r = await neGetAudioUrl(client, 103027, 'ape')
+    expect(requested.map((u) => u.match(/br=(\d+)/)?.[1])).toEqual(['999000', '320000'])
     expect(r.quality).toBe('320')
     expect(r.downgraded).toBe(true)
   })
