@@ -1,5 +1,6 @@
 import type { QqClient, MusicuReq } from './client'
 import { mergeLyricTranslation } from '../lyricMerge'
+import { mkBundle, normalizeDate, discOf, qqAlbumCoverUrl, type AlbumPage } from '../albumBundle'
 
 export type Quality = 'flac' | 'ape' | '320' | '128' | 'm4a'
 
@@ -230,12 +231,32 @@ export async function fetchPlaylist(client: QqClient, id: string): Promise<Track
   return list.map((e) => trackFromEntry(e))
 }
 
-export async function fetchAlbum(client: QqClient, mid: string): Promise<TrackDTO[]> {
+/** 专辑详情（含专辑级元数据 + 每曲序号/碟号）。
+ *  ⚠️ URL 的 .fcg 后缀是必需的：去掉得 HTTP 404 空 body，client.get 会把它报成
+ *  「rate-limited: 空响应（风控）」——排查 QQ 专辑问题时先看这条文案有没有骗人（2026-10-06 踩过）。
+ *  曲目映射复用同文件已有的 trackFromEntry（含经过测试的 isVipEntry 判据），不另写一份。 */
+export async function fetchAlbumInfo(client: QqClient, mid: string): Promise<AlbumPage> {
   const text = await client.get(`https://i.y.qq.com/v8/fcg-bin/fcg_v8_album_info_cp.fcg?albummid=${mid}&format=json`)
   const json = JSON.parse(stripJsonp(text))
-  const data = json?.data ?? {}
-  const list = (data?.list ?? []) as any[]
-  return list.map((e) => trackFromEntry(e, data?.name ?? ''))
+  const d = json?.data ?? {}
+  const albumMid = typeof d?.mid === 'string' ? d.mid : ''
+  // list 缺失/非数组一律按空专辑：调用方要靠 tracks.length===0 判「这张没歌」，不能抛
+  const list = (Array.isArray(d?.list) ? d.list : []) as any[]
+  const tracks: TrackDTO[] = list.map((e, i) => ({
+    ...trackFromEntry(e, d?.name ?? ''),
+    trackNo: i + 1,          // 服务端无序号字段（实测条目只有 belongCD/cdIdx）→ 按下标 +1
+    disc: discOf(e?.cdIdx),
+  }))
+  const bundle = mkBundle(
+    'qq', albumMid, d?.name ?? '', d?.singername ?? '', normalizeDate(d?.aDate),
+    typeof d?.company === 'string' ? d.company : '', qqAlbumCoverUrl(albumMid), tracks,
+  )
+  return { bundle, tracks }
+}
+
+/** 兼容壳：只要曲目列表的调用方（链接导入等） */
+export async function fetchAlbum(client: QqClient, mid: string): Promise<TrackDTO[]> {
+  return (await fetchAlbumInfo(client, mid)).tracks
 }
 
 /** 歌词：PlayLyricInfo 返回 base64 的 LRC。param 必须带 trans:1 才会返回译文

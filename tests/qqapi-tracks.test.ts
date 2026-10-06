@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, stripJsonp, qqCoverUrl, searchAlbums, isVipEntry, describeTierSizes } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchAlbumInfo, stripJsonp, qqCoverUrl, searchAlbums, isVipEntry, describeTierSizes } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -159,5 +159,160 @@ describe('qqCoverUrl（2026-09-06：搜索响应只有 pmid）', () => {
     expect(qqCoverUrl({ album: { pmid: '002dgkGb2BeT3R_2' } })).toBe('https://y.gtimg.cn/music/photo_new/T002R300x300M000002dgkGb2BeT3R_2.jpg')
     expect(qqCoverUrl({ album: { pmid: 'X', picUrl: 'http://a/b.jpg' } })).toBe('http://a/b.jpg')
     expect(qqCoverUrl({ album: {} })).toBe('')
+  })
+})
+
+// mock client：URL → 响应文本。专辑元数据用例逐例自带数据（fixture 的 album.json 只有 name/list 两键，
+// 接不出 aDate/company/mid 这些专辑级字段）。
+function mockAlbumClient(handler: (url: string) => string) {
+  return createQqClient((async (input: any) => {
+    return new Response(handler(String(input)), { status: 200 })
+  }) as unknown as typeof fetch, { uin: '0' })
+}
+
+describe('fetchAlbumInfo（0.7.0 专辑封装）', () => {
+  it('返回 { bundle, tracks }，元数据不再被丢弃', async () => {
+    const raw = JSON.stringify({ code: 0, data: {
+      name: '奇爱人生 LOVE ELEGIA', singername: '阿良良木健', aDate: '2019-05-20',
+      company: '未确定', mid: '002xyz', total_song_num: 21,
+      list: [{ songmid: 'S1', songname: '告别曲', albummid: '002xyz', singer: [{ name: '阿良良木健' }], cdIdx: 1 }],
+    } })
+    const client = mockAlbumClient(() => raw)
+    const r = await fetchAlbumInfo(client, '002xyz')
+    expect(r.bundle).toMatchObject({ source: 'qq', id: '002xyz', name: '奇爱人生 LOVE ELEGIA', totalTracks: 1 })
+    expect(r.tracks[0].trackNo).toBe(1)
+  })
+
+  it('请求 URL 必须带 .fcg 后缀（漏了得 404，被 client 误报成风控）', async () => {
+    const urls: string[] = []
+    await fetchAlbumInfo(mockAlbumClient((u: string) => { urls.push(u); return '{"data":{"list":[]}}' }), 'm1')
+    expect(urls[0]).toContain('fcg_v8_album_info_cp.fcg')
+  })
+
+  it('专辑级字段全部接出：date/company/coverUrl/discs（coverUrl 用 R500 大图，2026-10-07 冒烟验 200+JPEG）', async () => {
+    const raw = JSON.stringify({ code: 0, data: {
+      name: '奇爱人生 LOVE ELEGIA', singername: '阿良良木健', aDate: '2019-05-20', company: '某某唱片',
+      mid: '002xyz', singermid: '001abc',
+      list: [
+        { songmid: 'S1', songname: '告别曲', albummid: '002xyz', singer: [{ name: '阿良良木健' }], cdIdx: 1 },
+        { songmid: 'S2', songname: '遗忘山丘', albummid: '002xyz', singer: [{ name: '阿良良木健' }], cdIdx: 2 },
+      ],
+    } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002xyz')
+    expect(r.bundle.date).toBe('2019-05-20')
+    expect(r.bundle.company).toBe('某某唱片')
+    expect(r.bundle.artist).toBe('阿良良木健')
+    expect(r.bundle.coverUrl).toBe('https://y.gtimg.cn/music/photo_new/T002R500x500M000002xyz.jpg')
+    expect(r.bundle.discs).toEqual([1, 2])
+    expect(r.tracks.map((x) => x.disc)).toEqual([1, 2])
+  })
+
+  it('totalTracks 用 list 实长，不信 total_song_num（实测同一张专辑 21 vs 22）', async () => {
+    const list = Array.from({ length: 3 }, (_, i) => ({ songmid: `S${i}`, songname: `曲${i}`, albummid: '002m' }))
+    const raw = JSON.stringify({ code: 0, data: { name: 'A', mid: '002m', total_song_num: 2, list } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
+    expect(r.tracks.length).toBe(3)
+    expect(r.bundle.totalTracks).toBe(3)
+  })
+
+  it('list 缺失 / 为空 → tracks: [] 且 totalTracks: 0（空专辑要让调用方认得出来，不能抛）', async () => {
+    for (const body of ['{"data":{}}', '{"data":{"name":"空"} }', '{"code":0}', '{}', '{"data":{"list":[]}}', '{"data":{"list":null}}']) {
+      const r = await fetchAlbumInfo(mockAlbumClient(() => body), 'm-empty')
+      expect(r.tracks).toEqual([])
+      expect(r.bundle.totalTracks).toBe(0)
+      expect(r.bundle.discs).toEqual([1])
+    }
+  })
+
+  it('cdIdx 缺失/为 0 → 单碟 1（认不出就退化，不凭空造碟号）', async () => {
+    const raw = JSON.stringify({ data: { name: 'A', mid: '002m', list: [
+      { songmid: 'S1', songname: '一', albummid: '002m' },
+      { songmid: 'S2', songname: '二', albummid: '002m', cdIdx: 0 },
+    ] } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
+    expect(r.tracks.map((x) => x.disc)).toEqual([1, 1])
+    expect(r.bundle.discs).toEqual([1])
+  })
+
+  it('序号取数组下标 +1（服务端无序号字段，实测条目只有 belongCD/cdIdx）', async () => {
+    const raw = JSON.stringify({ data: { name: 'A', mid: '002m', list: [
+      { songmid: 'S1', albummid: '002m' }, { songmid: 'S2', albummid: '002m' }, { songmid: 'S3', albummid: '002m' },
+    ] } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
+    expect(r.tracks.map((x) => x.trackNo)).toEqual([1, 2, 3])
+  })
+
+  it('VIP 判定复用 isVipEntry：pay.pay_down>0 即 vip，file.try_begin 仍不参与', async () => {
+    // 回归锚：专辑解析若自己写一份判据（常见错误是拿 file.try_begin 判），免费曲会被打成会员歌
+    const raw = JSON.stringify({ data: { name: 'A', mid: '002m', list: [
+      { songmid: 'S1', albummid: '002m', pay: { pay_down: 1, pay_month: 1 } },
+      { songmid: 'S2', albummid: '002m', pay: { pay_down: 0 }, file: { try_begin: 95604 } },
+      { songmid: 'S3', albummid: '002m', flags: { try_begin: 1 } },
+    ] } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
+    expect(r.tracks.map((x) => x.vip)).toEqual([true, false, true])
+  })
+
+  it('曲目映射逐字段仍由 trackFromEntry 产出（spread 只加 trackNo/disc，不改写既有字段）', async () => {
+    const raw = JSON.stringify({ data: {
+      name: '专辑名（缺 albumname 时的兜底）', mid: '002xyz',
+      list: [{
+        songmid: 'S1', songname: '告别曲', albumname: '真实专辑名', albummid: '002xyz',
+        singer: [{ name: '阿良良木健' }, { name: '某某' }], media_mid: 'MM1', interval: 300,
+      }],
+    } })
+    const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002xyz')
+    expect(r.tracks[0]).toEqual({
+      id: 'S1',
+      name: '告别曲',
+      artist: '阿良良木健 / 某某',
+      album: '真实专辑名',
+      cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000002xyz.jpg',
+      mediaMid: 'MM1',
+      vip: false,
+      trackNo: 1,
+      disc: 1,
+    })
+    // 无 albumname 的条目仍走 data.name 兜底（trackFromEntry 的第二个参数不能丢）
+    const r2 = await fetchAlbumInfo(mockAlbumClient(() => JSON.stringify({
+      data: { name: '兜底专辑', mid: '002xyz', list: [{ songmid: 'S1', albummid: '' }] },
+    })), '002xyz')
+    expect(r2.tracks[0].album).toBe('兜底专辑')
+    expect(r2.tracks[0].cover).toBe('')
+  })
+
+  it('data.mid 缺失 → coverUrl 空串（拼不出就不写 cover.jpg，不出垃圾 URL）', async () => {
+    const r = await fetchAlbumInfo(mockAlbumClient(() => JSON.stringify({
+      data: { name: 'A', singermid: '001a', list: [{ songmid: 'S1', albummid: '002m' }] },
+    })), '002m')
+    expect(r.bundle.id).toBe('')
+    expect(r.bundle.coverUrl).toBe('')
+    expect(r.bundle.name).toBe('A')
+  })
+
+  it('JSONP 包裹照旧剥离（fcg 端点带 json=1 时可能回回调壳）', async () => {
+    const body = 'MusicJsonCallback(' + JSON.stringify({ data: { name: 'A', mid: '002m', list: [{ songmid: 'S1', albummid: '002m' }] } }) + ');'
+    const r = await fetchAlbumInfo(mockAlbumClient(() => body), '002m')
+    expect(r.tracks.length).toBe(1)
+  })
+
+  it('fetchAlbum 兼容壳仍只回 TrackDTO[]（Task 8 之前其他调用点照旧用）', async () => {
+    const raw = JSON.stringify({ data: { name: 'A', mid: '002m', list: [
+      { songmid: 'S1', songname: '一', albummid: '002m' }, { songmid: 'S2', songname: '二', albummid: '002m' },
+    ] } })
+    const tracks = await fetchAlbum(mockAlbumClient(() => raw), '002m')
+    expect(Array.isArray(tracks)).toBe(true)
+    expect(tracks.length).toBe(2)
+    expect(tracks[0].name).toBe('一')
+    expect(tracks[0].trackNo).toBe(1) // 壳复用同一解析，序号顺带带上（旧调用点不读它）
+  })
+
+  it('既有 fixture 路径（无专辑级字段）不因新解析而回归', async () => {
+    const client = createQqClient(routedFetch(), { uin: '0' })
+    const r = await fetchAlbumInfo(client, '000gXCTb2AhRR1')
+    expect(r.tracks.length).toBe(2)
+    expect(r.tracks[0].album).toBe('天空之城印象集')
+    expect(r.bundle.name).toBe('专辑名')
+    expect(r.bundle.totalTracks).toBe(2)
   })
 })
