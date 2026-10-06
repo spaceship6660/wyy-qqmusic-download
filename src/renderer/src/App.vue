@@ -595,6 +595,8 @@ async function refreshNePlaylists(): Promise<void> {
     neNickname.value = acc.nickname ?? ''
     nePlaylists.value = (await api.invoke<NePlaylist[]>('ne:playlists', acc.uid)) ?? []
   } catch (e) {
+    // 探测本身失败（断网/风控上抛）：只回显原因，**不置 neSessionExpired**——
+    // 拿不到结论不等于会话过期，侧栏须保持「已登录」（2026-10-07 与 neAuthStatus 同源的误报）。
     nePlaylistError.value = `网易云歌单加载失败：${e instanceof Error ? e.message : String(e)}`
   }
 }

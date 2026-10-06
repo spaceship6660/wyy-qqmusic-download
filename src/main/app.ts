@@ -8,7 +8,7 @@ import { getLoginUserInfo, isQqLoginExpired } from './qqapi/user'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
 import type { NeClient } from './neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount, neAccountChecked, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccountChecked, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
 import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
@@ -579,7 +579,10 @@ export function createApp(deps: AppDeps) {
     neAlbumSongs: (id: number) => neAlbumSongs(neClient, id),
     nePlaylistPage: (params: { id: string; offset: number; limit?: number }) =>
       nePlaylistPage(neClient, params.id, params.offset ?? 0, params.limit ?? 200),
-    neAccount: () => neAccount(neClient),
+    /** ne:account 是渲染侧的会话判据来源（App.vue 据此写「登录已失效」），必须用权威探测：
+     *  断网/风控要上抛，让调用方走 catch；用 neAccount 壳会把它们塌缩成 null→误报失效（2026-10-07）。
+     *  只要数据、不关心失败原因的调用方仍用 neAccount 壳。 */
+    neAccount: () => neAccountChecked(neClient),
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),
     neAuthImport: (header: string) => {

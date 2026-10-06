@@ -3,7 +3,7 @@ import path from 'node:path'
 
 export interface NeAuthCookie { cookie: string }
 /** sessionExpired：cookie 文件存在但服务端已不认（会话失效）。
- *  由 app.ts 依据 neAccount 探测结果注入，供渲染侧把「已登录」改显示为「登录已失效」。 */
+ *  由 app.ts 依据 neAccountChecked 探测结果注入，供渲染侧把「已登录」改显示为「登录已失效」。 */
 export interface NeAuthStatus { loggedIn: boolean; sessionExpired?: boolean }
 export interface NeAuth {
   /** 持久化 cookie（完整 Cookie 头）；空串表示未登录 */

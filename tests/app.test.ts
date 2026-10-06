@@ -738,3 +738,17 @@ describe('neAuthStatus 会话判据（0.7.0 审计修复）', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('ne:account 会话判据（2026-10-07 断网误报「登录已失效」修复）', () => {
+  it('探测抛错（断网/风控）→ neAccount 方法必须 reject，不得 resolve 成 null', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne-acct-'))
+    fs.writeFileSync(path.join(dir, 'netease_cookie.json'), JSON.stringify({ cookie: 'MUSIC_U=AAA; __csrf=B' }), 'utf-8')
+    const boom = vi.fn(async () => { throw new Error('fetch failed') }) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: boom })
+    // 渲染侧 refreshNePlaylists 靠「resolve null / reject」区分「服务端确认不认」与「请求本身失败」：
+    // 旧实现走 neAccount 壳（异常吞成 null），断网时 resolve null → 侧栏误置「登录已失效」。
+    // 反锚：handler 退回 neAccount 壳后本用例即失败（resolve 而非 reject）。
+    await expect(app.neAccount()).rejects.toThrow(/fetch failed/)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})

@@ -44,7 +44,9 @@ async function refreshAuth(): Promise<void> {
   const ok = !!s?.loggedIn
   store.setNeLogin(ok)
   if (ok) {
-    const acc: any = await api.invoke('ne:account')
+    // ne:account 走权威探测后会因断网/风控 reject（本函数由 onMounted 以 void 调用，裸 await 即未处理拒绝）；
+    // 这里只取昵称，探测失败就留空——登录态以上面 ne:auth:status 的结论为准，不在此处改判。
+    const acc: any = await api.invoke('ne:account').catch(() => null)
     nickname.value = acc?.nickname ?? ''
   } else {
     nickname.value = ''
