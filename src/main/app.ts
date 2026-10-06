@@ -8,12 +8,12 @@ import { getLoginUserInfo, isQqLoginExpired } from './qqapi/user'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
 import type { NeClient } from './neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount, neAccountChecked, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
 import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
 import { cdnFallbackUrls } from './neteaseapi/cdn'
-import { createNeAuth } from './neteaseAuth'
+import { createNeAuth, neLoggedInFromAccount } from './neteaseAuth'
 import { DownloadQueue, DownloadJob } from './downloader/queue'
 import { RateLimiter } from './downloader/ratelimit'
 import { downloadFile } from './downloader/file'
@@ -68,6 +68,9 @@ export function createApp(deps: AppDeps) {
   // 判定走权威接口 /api/nuser/account/get（profile.userId 有无）。
   // 仅当「文件存在且服务端确认无效」才算会话失效；网络抖动导致的探测失败不算（保守，避免误报未登录）。
   let neSessionExpired = false
+  // neAuthStatus 结果缓存（60s）：与 neteaseapi/tracks.ts 的 TRACK_IDS_TTL_MS 同款窗口
+  const NE_STATUS_TTL_MS = 60_000
+  let neStatusCache: { at: number; value: { loggedIn: boolean; sessionExpired?: boolean } } | null = null
   let settings = loadSettings(settingsFile)
 
   const emitEvent = deps.emitEvent ?? (() => {})
@@ -580,6 +583,7 @@ export function createApp(deps: AppDeps) {
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),
     neAuthImport: (header: string) => {
+      neStatusCache = null
       const ok = neAuth.importCookie(header)
       if (ok) {
         neClient.setCookie(header)
@@ -588,33 +592,47 @@ export function createApp(deps: AppDeps) {
       return ok
     },
     /** 登录态：文件存在 + 服务端确认有效才算「已登录」。
-     *  account 返回 null 时若探测没抛错，即服务端确实不认这份凭证 → sessionExpired。
-     *  探测抛错（网络异常）无法判定，保守沿用文件判据，避免误报未登录。 */
+     *  三态严格分开（2026-10-06 审计修复）：
+     *    服务端回带 profile.userId → 已登录；
+     *    服务端确认不认（profile 空）→ 未登录 + sessionExpired；
+     *    请求本身失败（断网/风控空响应）→ 判不了，保守沿用文件判据，**不置 sessionExpired**。
+     *  旧实现走 neAccount（异常也吞成 null），第三种情形塌进第二种，断网即误报「登录已失效」。
+     *  结果缓存 60s：App.vue 与 NeteaseTab.vue 挂载时各调一次、之后每次进网易云页再调，
+     *  不缓存会白打网络并挤占网易云频控预算（README「限速范围」条）。 */
     neAuthStatus: async () => {
       const hasFile = neAuth.getStatus().loggedIn
       if (!hasFile) {
         neSessionExpired = false
+        neStatusCache = null
         return { loggedIn: false }
       }
+      if (neStatusCache && Date.now() - neStatusCache.at < NE_STATUS_TTL_MS) return neStatusCache.value
+      let value: { loggedIn: boolean; sessionExpired?: boolean }
       try {
-        const acc = await neAccount(neClient)
-        if (acc) {
+        const acc = await neAccountChecked(neClient)
+        if (neLoggedInFromAccount(acc)) {
           neSessionExpired = false
-          return { loggedIn: true, sessionExpired: false }
+          value = { loggedIn: true, sessionExpired: false }
+        } else {
+          neSessionExpired = true
+          value = { loggedIn: false, sessionExpired: true }
         }
-        neSessionExpired = true
-        return { loggedIn: false, sessionExpired: true }
       } catch {
-        return { loggedIn: true, sessionExpired: neSessionExpired }
+        // 探测本身失败：无法判定，保留文件判据且不标记失效
+        value = { loggedIn: true, sessionExpired: neSessionExpired }
       }
+      neStatusCache = { at: Date.now(), value }
+      return value
     },
     neAuthClear: () => {
+      neStatusCache = null
       neAuth.clear()
       neClient.setCookie('')
       clearNeteaseTrackIdsCache()
       neSessionExpired = false
     },
     neAuthSaveFromWindow: (header: string) => {
+      neStatusCache = null
       neAuth.saveCookie(header)
       neClient.setCookie(header)
       clearNeteaseTrackIdsCache()

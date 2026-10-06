@@ -588,6 +588,7 @@ async function refreshNePlaylists(): Promise<void> {
     if (!acc?.uid) {
       // cookie 文件在但服务端不认（会话过期 / MUSIC_U 失效）→ 权威判据
       nePlaylistError.value = '网易云登录状态已失效（cookie 过期），请点左下角「退出」后重新扫码登录'
+      neSessionExpired.value = true // 同步侧栏：否则列表说「已失效」而侧栏仍绿色「已登录」
       return
     }
     neUid.value = acc.uid

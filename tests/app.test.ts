@@ -702,3 +702,39 @@ describe('unlockRun 解密补全管线', () => {
     expect(fs.readdirSync(env.dl)).toEqual([]) // 输出目录零文件
   })
 })
+
+describe('neAuthStatus 会话判据（0.7.0 审计修复）', () => {
+  it('探测抛错（断网/风控）→ 保守沿用文件判据，不得判「登录已失效」', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne-auth-'))
+    fs.writeFileSync(path.join(dir, 'netease_cookie.json'), JSON.stringify({ cookie: 'MUSIC_U=AAA; __csrf=B' }), 'utf-8')
+    const boom = vi.fn(async () => { throw new Error('fetch failed') }) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: boom })
+    const s = await app.neAuthStatus()
+    expect(s).toEqual({ loggedIn: true, sessionExpired: false }) // 旧实现：neAccount 吞异常→null→误报失效
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('服务端确认不认（profile 无 userId）→ loggedIn:false + sessionExpired:true', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne-auth-'))
+    fs.writeFileSync(path.join(dir, 'netease_cookie.json'), JSON.stringify({ cookie: 'MUSIC_U=EXP; __csrf=B' }), 'utf-8')
+    const ok = vi.fn(async () => new Response(JSON.stringify({ code: 200, profile: {} }))) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: ok })
+    const s = await app.neAuthStatus()
+    expect(s).toEqual({ loggedIn: false, sessionExpired: true })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('60s 内二次调用不再打网络（启动时 App.vue 与 NeteaseTab 各调一次）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne-auth-'))
+    fs.writeFileSync(path.join(dir, 'netease_cookie.json'), JSON.stringify({ cookie: 'MUSIC_U=AAA; __csrf=B' }), 'utf-8')
+    const f = vi.fn(async () => new Response(JSON.stringify({ code: 200, profile: { userId: 123, nickname: 'x' } }))) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    await app.neAuthStatus()
+    await app.neAuthStatus()
+    expect(f).toHaveBeenCalledTimes(1)
+    app.settingsSet({})            // 不应失效缓存
+    await app.neAuthStatus()
+    expect(f).toHaveBeenCalledTimes(1)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})

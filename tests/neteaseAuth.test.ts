@@ -35,15 +35,15 @@ describe('neLoggedInFromAccount（登录态语义判据）', () => {
     expect(neLoggedInFromAccount({ uid: 0 })).toBe(false)
   })
 
-  it('反锚：cookie 文件存在但服务端不认 → 文件判据为真、语义判据必须为假', () => {
-    // 这组断言锁定本次 bug 的根因：getStatus().loggedIn 只看文件存在，
-    // 旧 cookie 过期后仍返回 true → 侧栏恒显示「已登录」。语义判据必须拆开看。
+  it('反锚：cookie 文件在但服务端确认不认 → 文件判据真、语义判据假', () => {
+    // 锁本次 bug 根因：getStatus().loggedIn 只看文件存在，旧 cookie 过期后仍返回 true。
+    // 语义判据必须拿服务端探测结果（null = 服务端不认）来推翻文件判据。
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne3-'))
     const file = path.join(dir, 'net_cookie.json')
     const auth = createNeAuth({ cookiePath: file })
     auth.importCookie('MUSIC_U=EXPIRED_TOKEN; __csrf=z')
-    expect(auth.getStatus().loggedIn).toBe(true) // 文件判据：仍视为已登录（旧行为）
-    expect(neLoggedInFromAccount(null)).toBe(false) // 语义判据：服务端不认 → 必须为假
+    expect(auth.getStatus().loggedIn).toBe(true)      // 文件判据：仍视为已登录（旧行为）
+    expect(neLoggedInFromAccount(null)).toBe(false)   // 语义判据：服务端不认 → 必须为假
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
