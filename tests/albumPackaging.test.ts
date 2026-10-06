@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { renderCue, type CueEntry } from '../src/main/albumPackaging'
+import { AlbumPackager, renderCue, type CueEntry } from '../src/main/albumPackaging'
 import type { AlbumBundle } from '../src/main/albumBundle'
 
 const B: AlbumBundle = {
@@ -142,5 +142,150 @@ describe('renderCue', () => {
     const s = cue({ ...B, discs: [1, 2] }, E)
     expect(s).not.toMatch(/DISC/i)
     expect(s).not.toContain('CD01')
+  })
+})
+
+// ---------- Task 12：AlbumPackager 完成度跟踪 ----------
+// cue 的前提是「这一碟真的全落盘了」，而这个事实只有记账方知道：落盘名可能被 uniquePath 改成
+// '01 t1(1).mp3'、容器可能被降级换成 mp3。所以这里断言的是「记账结果」，
+// 而不是「文件名能不能拼出来」——后者拼得出来恰恰是错的（指向了不存在的文件）。
+describe('AlbumPackager 完成度', () => {
+  const B1: AlbumBundle = { ...B, totalTracks: 2, discs: [1] }
+  const B2: AlbumBundle = { ...B, totalTracks: 2, discs: [1, 2] }
+  const done = (trackNo: number, fileName: string, title: string, ext = 'flac') =>
+    ({ trackNo, outputPath: fileName, ext, title })
+
+  it('单碟：未下齐不出 cue，下齐返回该碟', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    expect(p.record(B1, done(1, '01 a.flac', 'a'))).toEqual([])
+    expect(p.cueEntries(B1, 1)).toEqual([])   // 半张时连条目都不给：cue 指向缺文件比没有 cue 更糟
+    expect(p.record(B1, done(2, '02 b.flac', 'b'))).toEqual([1])
+    expect(p.cueEntries(B1, 1).map((e) => e.fileName)).toEqual(['01 a.flac', '02 b.flac'])
+  })
+
+  it('多碟：CD01 齐了先出 CD01，不等 CD02', () => {
+    const p = new AlbumPackager()
+    p.plan(B2, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 2 }])
+    expect(p.record(B2, done(1, '01 a.flac', 'a'))).toEqual([1])
+    // 各碟只收自己的条目：CD01 的 cue 里出现 CD02 的文件，播放器就会去隔壁目录找不存在的相对路径
+    expect(p.cueEntries(B2, 1).map((e) => e.trackNo)).toEqual([1])
+    expect(p.cueEntries(B2, 2)).toEqual([])
+    expect(p.record(B2, done(2, '02 b.flac', 'b'))).toEqual([2])
+    expect(p.cueEntries(B2, 2).map((e) => e.trackNo)).toEqual([2])
+    // 一次记账只报自己那一碟：CD01 早已写过 cue，被 CD02 的完成连带重写等于白写一遍（也会把
+    // 「哪一碟变了」这件事说得像两碟一起变）
+    expect(p.record(B2, done(1, '01 a(1).flac', 'a'))).toEqual([1])
+  })
+
+  it('已齐碟里的曲被重试覆写 → 该碟再报一次，cue 跟着新落盘名重写', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    expect(p.record(B1, done(1, '01 a.flac', 'a'))).toEqual([])
+    expect(p.record(B1, done(2, '02 b.flac', 'b'))).toEqual([1])
+    // 第二次整张下载：t2 撞名落盘成 '02 b(1).flac'。若这里不报该碟，盘上的 cue 就一直写着上一轮的文件名
+    expect(p.record(B1, done(2, '02 b(1).flac', 'b'))).toEqual([1])
+    expect(p.cueEntries(B1, 1).map((e) => e.fileName)).toEqual(['01 a.flac', '02 b(1).flac'])
+  })
+
+  it('同一曲重复完成（重试）按后到者覆盖，不重复触发', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(p.record(B1, done(1, '01 a(1).flac', 'a'))).toEqual([])
+    p.record(B1, done(2, '02 b.flac', 'b'))
+    expect(p.cueEntries(B1, 1).map((e) => e.fileName)).toEqual(['01 a(1).flac', '02 b.flac'])
+  })
+
+  it('cue 条目的 title 用原曲名，不从文件名反推（safeName 会换掉 / : * 等字符并截断）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 A-B.flac', 'A/B'))
+    p.record(B1, done(2, '02 b.flac', 'b'))
+    expect(p.cueEntries(B1, 1)[0].title).toBe('A/B')
+  })
+
+  it('fileName 取实际落盘全路径的 basename，容器跟落盘扩展名（降级换档后 cue 才不会指错类型）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    // 第 1 曲请求无损但该直链 404 → 重取拿到 320k，落盘是 mp3：record 拿的是 job.outputPath
+    p.record(B1, { trackNo: 1, outputPath: 'C:\\dl\\S - A (2019)\\01 a.mp3', ext: 'mp3', title: 'a' })
+    p.record(B1, done(2, 'C:/dl/S - A (2019)/02 b.flac', 'b'))
+    expect(p.cueEntries(B1, 1)).toEqual([
+      { trackNo: 1, title: 'a', fileName: '01 a.mp3', container: 'MP3' },
+      { trackNo: 2, title: 'b', fileName: '02 b.flac', container: 'FLAC' },
+    ])
+  })
+
+  it('ape/m4a 容器 → cueEntries 返回空（该碟不出 cue，宁缺不错）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 a.ape', 'a', 'ape'))
+    expect(p.record(B1, done(2, '02 b.ape', 'b', 'ape'))).toEqual([1])  // 碟是「齐」的，只是容器索引不了
+    expect(p.cueEntries(B1, 1)).toEqual([])
+    // 混进一个不可索引的容器就整碟撤回（与 renderCue 的「一碟要么整碟可索引」同口径）
+    p.record(B1, done(2, '02 b.mp3', 'b', 'mp3'))
+    expect(p.cueEntries(B1, 1)).toEqual([])
+    // 换成两个可索引容器才出条目，且容器取落盘 ext 而非请求档位
+    p.record(B1, done(1, '01 a.flac', 'a', 'flac'))
+    expect(p.cueEntries(B1, 1).map((e) => e.container)).toEqual(['FLAC', 'MP3'])
+  })
+
+  it('取消/失败不入账（半张不会被算成整张）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(p.record(B1, done(2, '', 'b'))).toEqual([])   // outputPath 空 = 未产出，不记账
+    expect(p.cueEntries(B1, 1)).toHaveLength(0)
+  })
+
+  it('两张专辑各自记账（键含 source:id，同 trackNo 不串台）', () => {
+    const p = new AlbumPackager()
+    const other: AlbumBundle = { ...B1, id: '8' }
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.plan(other, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(p.record(other, done(1, '01 other.flac', 'o'))).toEqual([])
+    expect(p.cueEntries(B1, 1)).toEqual([])
+    p.record(B1, done(2, '02 b.flac', 'b'))
+    expect(p.cueEntries(B1, 1).map((e) => e.fileName)).toEqual(['01 a.flac', '02 b.flac'])
+    expect(p.cueEntries(other, 1)).toEqual([])
+  })
+
+  it('未 plan 过的批次：record 不抛、返回空碟，cueEntries 也为空（没有期望就谈不上「齐」）', () => {
+    const p = new AlbumPackager()
+    expect(p.record(B1, done(1, '01 a.flac', 'a'))).toEqual([])
+    expect(p.cueEntries(B1, 1)).toEqual([])
+  })
+
+  it('条目按 trackNo 升序（入账顺序是完成顺序，与曲目顺序无关）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(2, '02 b.flac', 'b'))
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(p.cueEntries(B1, 1).map((e) => e.trackNo)).toEqual([1, 2])
+  })
+
+  it('trackNo 缺失：登记按下标、记账按 1 → 该碟永远配不齐，只出不了 cue（不出缺段 cue）', () => {
+    // 两处口径不一致是有意的：凭空把两首都算成「第 1 首」会配平一张只有一段 FILE 的 cue，
+    // 播放器看到的是一张 2 首的专辑里第 2 首凭空消失——少一份 cue 比给一份错的强。
+    const p = new AlbumPackager()
+    p.plan(B1, [{ disc: 1 }, { disc: 1 }])
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(p.record(B1, done(1, '01 a(1).flac', 'a'))).toEqual([])
+    expect(p.cueEntries(B1, 1)).toEqual([])
+  })
+
+  it('AlbumPackager 出的条目直接喂 renderCue 能出文本（两个模块的口径必须咬合）', () => {
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B1, done(1, '01 a.flac', 'a'))
+    expect(renderCue(B1, p.cueEntries(B1, 1))).toBeNull()
+    p.record(B1, done(2, '02 b.mp3', 'b', 'mp3'))
+    const entries = p.cueEntries(B1, 1)
+    const s = renderCue(B1, entries) as string
+    expect(s).toContain('FILE "01 a.flac" FLAC')
+    expect(s).toContain('FILE "02 b.mp3" MP3')
+    expect(s).not.toContain('FILE "02 b.mp3" FLAC')   // 容器来自落盘 ext，不是请求档位
   })
 })

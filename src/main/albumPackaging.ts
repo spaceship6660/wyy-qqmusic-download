@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { AlbumBundle } from './albumBundle'
 
 /** cue 的一个 FILE 段条目，来自「实际落盘的那一笔」而非请求参数。
@@ -47,4 +48,80 @@ export function renderCue(b: AlbumBundle, entries: CueEntry[]): string | null {
     lines.push('    INDEX 00 00:00:00')
   }
   return BOM + lines.join('\r\n') + '\r\n'
+}
+
+/** 批次键：完成度表与「cover 是否已写过」都用它。两处各拼一遍就会漂成「同 id 的两个源互相顶包」
+ *  （QQ 与网易云的 id 命名空间不同：'m1' 与 '1' 都会出现），所以只留这一份算式。 */
+export function albumKey(b: AlbumBundle): string {
+  return `${b.source}:${b.id}`
+}
+
+/** 一笔完成记录：outputPath 必须是**实际落盘全路径**（含 uniquePath 加过的 (1) 后缀），
+ *  ext 必须是**落盘**扩展名（降级换档后它与请求档位不同），
+ *  title 必须是**原曲名**——文件名经 safeName 会换掉 / : * 等字符并截断，反推会失真。 */
+export interface AlbumCompletion {
+  trackNo: number
+  outputPath: string
+  ext: string
+  title: string
+}
+
+/** 整张专辑的批次完成度：plan() 登记期望，record() 记账，某碟下齐才允许出该碟 cue。
+ *  session 内有效（与 app.ts 的 jobSpecs 同生命周期）；重启后需重新整张入队。 */
+export class AlbumPackager {
+  private expected = new Map<string, Map<number, number>>()  // key → (trackNo → disc)
+  private done = new Map<string, Map<number, { fileName: string; ext: string; title: string }>>()
+
+  /** 登记「这批曲目属于这张专辑的哪一碟」。trackNo 缺失按下标+1：期望表按入队顺序就是整批，
+   *  而 record 那边缺 trackNo 只能按 1 —— 两处口径不一致时该碟永远配不齐、只出不了 cue，
+   *  这比把两首都算成「第 1 首」、出一张缺了第 2 段的 cue 安全。 */
+  plan(b: AlbumBundle, tracks: Array<{ trackNo?: number; disc?: number }>): void {
+    const k = albumKey(b)
+    const exp = this.expected.get(k) ?? new Map<number, number>()
+    tracks.forEach((t, i) => {
+      // disc 回落 discs[0]（与 runDownloadJob 的落盘目录同一个算式）：两处不一致时
+      // cue 会写到音频不在的那个目录。
+      exp.set(t.trackNo ?? i + 1, t.disc ?? b.discs[0] ?? 1)
+    })
+    this.expected.set(k, exp)
+    if (!this.done.has(k)) this.done.set(k, new Map())
+  }
+
+  /** 记一笔完成；outputPath 为空视为未产出（取消/失败）不入账——半张永远不该被算成整张。
+   *  返回这次记账**所属且已下齐**的碟（0 或 1 个）：一次记账只可能改动一碟的完整度
+   *  （别的碟一条账都没变），所以不去重报别的碟。已齐碟里的曲被重试覆写时同样报一次——
+   *  cue 是整碟全量重写，覆写后的新落盘名（'01 a(1).flac'）必须跟着进 cue，
+   *  否则 FILE 还指着上一轮的旧文件（spec §5.5「此后任一重试成功都会重写该碟 cue」）。 */
+  record(b: AlbumBundle, c: AlbumCompletion): number[] {
+    if (!c.outputPath) return []
+    const k = albumKey(b)
+    const d = this.done.get(k) ?? new Map<number, { fileName: string; ext: string; title: string }>()
+    d.set(c.trackNo, { fileName: path.basename(c.outputPath), ext: c.ext, title: c.title })
+    this.done.set(k, d)
+    const exp = this.expected.get(k)
+    // 没登记过这首（plan 之外的批次）→ 谈不上「这次把它配齐了」
+    const disc = exp?.get(c.trackNo)
+    if (!exp || disc === undefined) return []
+    return [...exp].every(([no, dd]) => dd !== disc || d.has(no)) ? [disc] : []
+  }
+
+  /** 该碟的 cue 条目；碟内任一曲未落盘、或含播放器索引不了的容器（ape/m4a/ogg）→ 返回空，不出 cue。
+   *  容器判据复用 renderCue 那份 CUE_CONTAINERS：两处各列一遍会漂成「这里放行的容器在 renderCue 被撤回」，
+   *  于是 cue 写不出来、却没有任何一处说为什么。 */
+  cueEntries(b: AlbumBundle, disc: number): CueEntry[] {
+    const k = albumKey(b)
+    const exp = this.expected.get(k)
+    const d = this.done.get(k)
+    if (!exp || !d) return []
+    const out: CueEntry[] = []
+    for (const [no, dd] of exp) {
+      if (dd !== disc) continue
+      const rec = d.get(no)
+      if (!rec) return []
+      const container = rec.ext.toUpperCase()
+      if (!CUE_CONTAINERS.has(container)) return []
+      out.push({ trackNo: no, title: rec.title, fileName: rec.fileName, container })
+    }
+    return out.sort((x, y) => x.trackNo - y.trackNo)
+  }
 }

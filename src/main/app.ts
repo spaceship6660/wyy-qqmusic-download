@@ -23,7 +23,8 @@ import type { TagMeta } from './tagger/types'
 import { decryptQmcFile } from './unlock/decrypt'
 import { safeName, uniquePath } from './fsUtils'
 import type { AlbumBundle, AlbumPage } from './albumBundle'
-import { albumTrackDir, trackBaseName, trackPad } from './albumBundle'
+import { albumRootDir, albumTrackDir, trackBaseName, trackPad } from './albumBundle'
+import { AlbumPackager, albumKey, renderCue } from './albumPackaging'
 import { loadSettings, saveSettings, Settings, isValidQuality, isValidLyricMode, isValidIdentity, clampConcurrency } from './settings'
 
 export interface AppDeps {
@@ -121,6 +122,73 @@ export function createApp(deps: AppDeps) {
       }
     }
     : undefined
+
+  // ---------- 整张专辑的附属文件（spec §5.5 / §5.7） ----------
+  // cover 在首个任务完成时写一次（专辑级资源，不等整张下齐）；album.cue 只在**该碟全部曲目落盘后**
+  // 才写，且写进该碟自己的目录。目录一律走 albumBundle 的 albumRootDir/albumTrackDir——与
+  // runDownloadJob 的落盘目录是同一个算式，两处各拼一遍必然漂移成「cue 指向音频不在的目录」，
+  // 而那要到用户加载 cue 才暴露。
+  const packager = new AlbumPackager()
+  // 键 = albumKey(bundle)：与完成度表同源，避免同 id 不同源（QQ 的 'm1' / 网易云的 '1'）互相顶包。
+  // session 内有效，与 jobSpecs/packager 同生命周期；重启后重新入队会再写一次。
+  const coverWritten = new Set<string>()
+
+  /** 抓并落 cover.jpg。不抛不等于不报：抓取失败只写诊断日志——一首下好的歌不该因为封面拿不到
+   *  而被判成下载失败（cover 是附属品，曲目本身已经完好）。 */
+  const writeAlbumCover = async (key: string, b: AlbumBundle): Promise<void> => {
+    if (coverWritten.has(key)) return
+    if (!b.coverUrl) {
+      coverWritten.add(key)   // 这张根本没封面源，登记掉，后续每首不再重复判
+      return
+    }
+    const cover = await fetchCover(b.coverUrl, fetchImpl)
+    if (!cover) {
+      dbgFile?.(`专辑 ${key} 封面抓取失败（${b.coverUrl}），跳过 cover（不影响曲目与 cue）`)
+      return                  // 不登记：偶发失败留给下一首再试一次
+    }
+    // 扩展名按魔数嗅探结果给（PNG 不能冒充 .jpg）；落专辑根，多碟时不在每个 CDnn 里重复一份
+    const ext = cover.mime === 'image/png' ? 'png' : 'jpg'
+    fs.writeFileSync(path.join(albumRootDir(settings.downloadDir, b), `cover.${ext}`), cover.data)
+    coverWritten.add(key)
+  }
+
+  /** 记一笔完成 + 补写 cover 与该碟的 cue。约定不抛（外层还有一道 .catch 兜底）。 */
+  const writeAlbumExtras = async (job: DownloadJob): Promise<void> => {
+    const b = job.album
+    const out = job.outputPath
+    if (!b || !out) return
+    const key = albumKey(b)
+    // 记账排在 cover 之前：cover 是网络活、可能失败，而「哪些曲目落了盘」是出 cue 的唯一依据，
+    // 一旦被 cover 那次失败一起带走，这一碟就永远配不齐、再也出不了 cue。
+    const justCompleted = packager.record(b, {
+      trackNo: job.track.trackNo ?? 1,
+      outputPath: out,
+      // 落盘扩展名（不是请求档位）：降级换档后 cue 的 FILE 容器必须跟着真实文件走
+      ext: path.extname(out).slice(1).toLowerCase(),
+      // 原曲名（不是文件名）：文件名过了 safeName，会换掉 / : * 等字符并截断
+      title: job.track.name,
+    })
+    try {
+      await writeAlbumCover(key, b)
+    } catch (e) {
+      dbgFile?.(`专辑 ${key} cover 写入异常：${e instanceof Error ? e.message : String(e)}`)
+    }
+    for (const disc of justCompleted) {
+      const text = renderCue(b, packager.cueEntries(b, disc))
+      // renderCue 回 null = 这一碟不该有 cue（容器播放器索引不了 / 一条条目都没有）：直接跳过。
+      // 不能写个空文件占位——0 字节的 album.cue 会让播放器报「无效的 cue」，比没有 cue 更扰民。
+      if (!text) {
+        dbgFile?.(`专辑 ${key} 第 ${disc} 碟不出 album.cue（容器不可索引或缺曲目），已跳过`)
+        continue
+      }
+      try {
+        // 同步写：cue 整碟全量覆盖（重试覆写落盘名后必须重写），异步写会让两次重写交错成半截文件
+        fs.writeFileSync(path.join(albumTrackDir(settings.downloadDir, b, disc), 'album.cue'), text, 'utf-8')
+      } catch (e) {
+        dbgFile?.(`专辑 ${key} 第 ${disc} 碟 album.cue 写入失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
 
   // 共享下载骨架（QQ/网易云 runner 共同）：直链→占位→下载(失败重取一次)→标签→清理。
   // 两源差异仅三个参数化点：直链解析 resolveOnce、扩展名 extFor、元数据 fetchDetail/fetchLyrics；
@@ -243,6 +311,14 @@ export function createApp(deps: AppDeps) {
           copyright: '',
           genre: '',
           lyrics: embedLyrics ? lyrics : '',
+          // 序号只在「整张」时给：平铺下载这几个全是 undefined → TRCK/TPOS 一帧都不写（0.6.1 产物逐字节一致）。
+          // 总数取 album 而不是批次里数到的曲目数：专辑共 10 首、只勾了 2 首时，标签该写「1/10」而不是「1/2」。
+          track: job.album ? job.track.trackNo : undefined,
+          trackTotal: job.album ? job.album.totalTracks : undefined,
+          // disc 回落 discs[0]，与上面落盘目录同一个算式：两处不一致时标签说的碟号和文件真在的碟目录会各说一套
+          disc: job.album ? (job.track.disc ?? job.album.discs[0]) : undefined,
+          // 碟总数只在多碟时写：单碟写「1/1」等于凭空造出「这专辑共分一碟」这个没人说过的事实
+          discTotal: job.album && job.album.discs.length > 1 ? job.album.discs.length : undefined,
           cover: cover?.data,
           coverMime: cover?.mime,
         }
@@ -358,7 +434,16 @@ export function createApp(deps: AppDeps) {
   queue.on('jobQueued', (j) => emitEvent('dl:queued', { ...j }))
   queue.on('jobStart', (j) => emitEvent('dl:jobStart', { ...j }))
   queue.on('jobProgress', (j) => emitEvent('dl:progress', { ...j }))
-  queue.on('jobDone', (j) => emitEvent('dl:done', { ...j }))
+  queue.on('jobDone', (j) => {
+    emitEvent('dl:done', { ...j })
+    // 附属文件（cover/cue）是「下载成功之后」的副作用：写坏了不许把这行变成失败行，
+    // 但也不能 `void` 一丢了之——async 函数的 reject 没人接就是 unhandled rejection，
+    // Node 15+ 默认把它升成进程级崩溃。这里显式接住并落诊断日志。
+    if (j.album) {
+      const key = albumKey(j.album)
+      writeAlbumExtras(j).catch((e) => dbgFile?.(`专辑 ${key} 附属文件写入失败：${e instanceof Error ? e.message : String(e)}`))
+    }
+  })
   queue.on('jobFailed', (j) => emitEvent('dl:failed', { ...j }))
   queue.on('jobCancelled', (j) => emitEvent('dl:cancelled', { ...j }))
 
@@ -543,6 +628,10 @@ export function createApp(deps: AppDeps) {
         if (oldest.done) break
         jobSpecs.delete(oldest.value)
       }
+      // 专辑批次：登记期望曲目，供完成度判定（无 album 时不调用 → 平铺下载零影响）。
+      // 登记的是**去重后真正入队**的曲目而不是入参 tracks：同次入队里的重复 id 若占掉一个期望槽位，
+      // 那一槽永远等不到落盘，整碟就再也出不了 cue。
+      if (album) packager.plan(album, jobs.map((j) => j.track))
       queue.enqueue(jobs)
       return true
     },
