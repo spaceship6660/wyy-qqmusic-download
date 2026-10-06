@@ -75,10 +75,31 @@ describe('neGetAudioUrl', () => {
     expect(r.downgraded).toBe(true)
   })
 
-  it('ape/m4a 请求档不在支持表 → 从 320 起试', async () => {
-    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/320.mp3', br: 320000 }]))
+  it('ape 档必须先打 br=999000（无损），不得从 320 起跳', async () => {
+    const requested: string[] = []
+    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/a.flac', br: 1065126 }], requested))
+    const r = await neGetAudioUrl(client, 103027, 'ape')
+    expect(requested[0]).toContain('br=999000')
+    expect(r.quality).toBe('flac')
+    expect(r.downgraded).toBe(false) // ape → 真无损到手：不是降级（旧实现恒判 true，是误报）
+  })
+
+  it('ape 无损拿不到 → 降 320 且标降级', async () => {
+    const client = createNeClient(urlFetch([
+      { url: null, br: 0 },
+      { url: 'https://m10.music.126.net/320.mp3', br: 320000 },
+    ]))
     const r = await neGetAudioUrl(client, 103027, 'ape')
     expect(r.quality).toBe('320')
     expect(r.downgraded).toBe(true)
+  })
+
+  it('m4a 同 ape：从无损起跳', async () => {
+    const requested: string[] = []
+    const client = createNeClient(urlFetch([{ url: 'https://m10.music.126.net/a.flac', br: 902102 }], requested))
+    const r = await neGetAudioUrl(client, 103027, 'm4a')
+    expect(requested[0]).toContain('br=999000')
+    expect(r.quality).toBe('flac')
+    expect(r.downgraded).toBe(false)
   })
 })

@@ -31,10 +31,12 @@ export async function neGetAudioUrl(
   preferred: Quality,
   debug?: (line: string) => void,
 ): Promise<NeAudioUrlResult> {
-  // ape/m4a 无对应 br 档 → 从 320 起，且命中即视为降级
+  // ape/m4a 在网易云没有对应 br 档，但它们表达的是「用户想要尽可能高的音质」，
+  // 所以起跳点取降级链首位（无损）。旧实现写 startIdx=1（从 320 起），等于
+  // 「选了 APE 就对整张网易云歌单放弃无损」——2026-10-06 实机三首全标「已降级」的根因。
   const supported = NE_QUALITY_BR[preferred] !== undefined
-  const startIdx = supported ? NE_LADDER.indexOf(preferred) : 1
-  for (let i = Math.max(0, startIdx); i < NE_LADDER.length; i++) {
+  const targetIdx = supported ? NE_LADDER.indexOf(preferred) : 0
+  for (let i = targetIdx; i < NE_LADDER.length; i++) {
     const q = NE_LADDER[i]
     const br = NE_QUALITY_BR[q]!
     const json = await client.getJson<{ code?: number; data?: Array<{ url?: string | null; br?: number }> }>(
@@ -45,10 +47,11 @@ export async function neGetAudioUrl(
     // 诊断：只记命中与否 + 业务码，不记直链（失败现场定位：版权空 vs 风控 vs 权益）
     debug?.(`ne vkey ${id} ${q}(br=${br})：${url ? `命中(实际br=${row?.br ?? '?'})` : `空(code=${json?.code ?? '?'})`}`)
     if (url) {
-      // 以响应 br 校正实际质量；拿不到 br 才回退请求档
+      // 以响应 br 校正实际质量；拿不到 br 才回退请求档。
+      // 降级 = 实际档比目标档低。ape/m4a 的目标档按无损算，故「ape → 无损」不算降级。
       const actual = qualityFromBr(row?.br) ?? q
       const actualIdx = NE_LADDER.indexOf(actual)
-      return { url, quality: actual, downgraded: !supported || actualIdx > startIdx }
+      return { url, quality: actual, downgraded: actualIdx > targetIdx }
     }
   }
   throw new QqApiError(
