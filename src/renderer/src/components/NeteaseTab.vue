@@ -186,7 +186,7 @@ onUnmounted(() => {
       <button :class="{ active: searchTab === 'song' }" @click="switchSearchTab('song')">歌曲</button>
       <button :class="{ active: searchTab === 'album' }" @click="switchSearchTab('album')">专辑</button>
     </div>
-    <DownloadOptions v-if="searchTab === 'song'" />
+    <DownloadOptions source="netease" />
     <template v-if="searchTab === 'album' && !openedAlbum">
       <div class="plist-grid">
         <div v-for="a in albums" :key="a.id" class="plist-card" @click="openAlbum(a.id, a.name)">

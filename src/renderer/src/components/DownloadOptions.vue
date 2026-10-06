@@ -1,12 +1,20 @@
 <script setup lang="ts">
+import { computed, watch } from 'vue'
 import { useDownloadStore } from '../stores/download'
+import { isQualityFor, qualitiesFor, resolveQuality, type Quality } from '../qualityOptions'
 import { api } from '../api'
 
 // 下载时选择器：码率 + 歌词模式（本次下载批次生效；改动即持久化为默认值，
 // 下次打开接着用——设置页存的是同一份，启动时由 App.vue 从 settings:get 载入 store）
+//
+// source 决定可见档位（档位表与规则在 qualityOptions.ts）：APE/m4a 是 QQ 独有档，
+// 网易云没有对应 br，摆过去会静默丢无损；当前档位不在可见档内时立即回落无损并持久化。
+const props = defineProps<{ source: 'qq' | 'netease' }>()
 const store = useDownloadStore()
 
-function setQuality(q: 'flac' | 'ape' | '320' | '128' | 'm4a'): void {
+const visible = computed(() => qualitiesFor(props.source))
+
+function setQuality(q: Quality): void {
   store.setQuality(q)
   void api.invoke('settings:set', { quality: q })
 }
@@ -16,13 +24,16 @@ function setLyricMode(m: 'both' | 'embed' | 'lrc' | 'none'): void {
   void api.invoke('settings:set', { lyricMode: m })
 }
 
-const QUALITIES: Array<{ v: 'flac' | 'ape' | '320' | '128' | 'm4a'; label: string }> = [
-  { v: 'flac', label: '无损' },
-  { v: 'ape', label: 'APE' },
-  { v: '320', label: '320k' },
-  { v: '128', label: '128k' },
-  { v: 'm4a', label: 'm4a' },
-]
+// immediate 保证首次挂载即校正：settings.json 里可能残留另一源写入的档位（如 QQ 侧选过 ape），
+// 不回落就会带着无效档位进下载管线。resolveQuality 已合法时原样返回，回落一次即收敛不循环。
+watch(
+  () => [props.source, store.quality] as const,
+  () => {
+    if (!isQualityFor(props.source, store.quality)) setQuality(resolveQuality(props.source, store.quality))
+  },
+  { immediate: true },
+)
+
 const LYRIC_MODES: Array<{ v: 'both' | 'embed' | 'lrc' | 'none'; label: string }> = [
   { v: 'both', label: '内嵌+另存' },
   { v: 'embed', label: '仅内嵌' },
@@ -34,7 +45,7 @@ const LYRIC_MODES: Array<{ v: 'both' | 'embed' | 'lrc' | 'none'; label: string }
 <template>
   <div class="download-options">
     <span class="label">码率</span>
-    <label v-for="q in QUALITIES" :key="q.v" class="opt">
+    <label v-for="q in visible" :key="q.v" class="opt">
       <input type="radio" name="quality" :value="q.v" :checked="store.quality === q.v" @change="setQuality(q.v)" />
       {{ q.label }}
     </label>

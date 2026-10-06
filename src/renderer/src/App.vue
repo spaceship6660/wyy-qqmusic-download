@@ -955,7 +955,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
         <p v-else-if="listLoading" class="loading">加载中…<span class="spinner"></span></p>
         <p v-if="listNotice" class="notice">{{ listNotice }}</p>
         <!-- 本批下载选项（码率/歌词）：喜欢/歌单/专辑/链接页此前都没有，只能用设置默认值 -->
-        <DownloadOptions v-if="!listLoading || store.tracks.length > 0" />
+        <DownloadOptions v-if="!listLoading || store.tracks.length > 0" :source="songsView.source" />
         <TrackGrid
           :tracks="store.tracks"
           :selected-ids="store.selectedIds"
@@ -973,7 +973,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           <button :class="{ active: searchTab === 'song' }" @click="switchSearchTab('song')">歌曲</button>
           <button :class="{ active: searchTab === 'album' }" @click="switchSearchTab('album')">专辑</button>
         </div>
-        <DownloadOptions v-if="searchTab === 'song'" />
+        <DownloadOptions source="qq" />
         <p v-if="listNotice" class="notice">{{ listNotice }}</p>
         <TrackGrid
           v-if="searchTab === 'song' && store.trackSource !== 'netease'"

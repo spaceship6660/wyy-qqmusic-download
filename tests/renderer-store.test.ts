@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDownloadStore } from '../src/renderer/src/stores/download'
+import { isQualityFor, qualitiesFor, resolveQuality } from '../src/renderer/src/qualityOptions'
 
 describe('download store', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -80,5 +81,46 @@ describe('网易云选中集（窗口底部工具栏共用）', () => {
     s.neClear()
     expect(s.neSelectedIds.size).toBe(0)
     expect(s.selectedIds.size).toBe(1) // QQ 选中不受影响
+  })
+})
+
+describe('码率档位按源过滤（DownloadOptions 的规则层，纯函数）', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('网易云只有 flac/320/128，QQ 五档全开', () => {
+    expect(qualitiesFor('netease').map((q) => q.v)).toEqual(['flac', '320', '128'])
+    expect(qualitiesFor('netease').map((q) => q.label)).toEqual(['无损', '320k', '128k'])
+    expect(qualitiesFor('qq').map((q) => q.v)).toEqual(['flac', 'ape', '320', '128', 'm4a'])
+  })
+
+  it('isQualityFor：APE/m4a 对网易云不成立，对 QQ 成立', () => {
+    expect(isQualityFor('netease', 'ape')).toBe(false)
+    expect(isQualityFor('netease', 'm4a')).toBe(false)
+    expect(isQualityFor('netease', 'flac')).toBe(true)
+    expect(isQualityFor('netease', '320')).toBe(true)
+    expect(isQualityFor('netease', '128')).toBe(true)
+    expect(isQualityFor('qq', 'ape')).toBe(true)
+    expect(isQualityFor('qq', 'm4a')).toBe(true)
+  })
+
+  it('resolveQuality：跨源残留的 ape 在网易云回落无损，合法档原样保留', () => {
+    // settings.json 的 quality 是全局持久化的，QQ 侧选过 ape 后切到网易云会带着它进下载管线
+    expect(resolveQuality('netease', 'ape')).toBe('flac')
+    expect(resolveQuality('netease', 'm4a')).toBe('flac')
+    expect(resolveQuality('netease', '320')).toBe('320')
+    expect(resolveQuality('netease', 'flac')).toBe('flac')
+    expect(resolveQuality('qq', 'ape')).toBe('ape') // QQ 侧 ape 合法，不得被改写
+  })
+
+  it('回落写回 store 后当前档一定落在本源可见档内（组件 watch 的等价断言）', () => {
+    const s = useDownloadStore()
+    s.setQuality('ape')
+    const next = resolveQuality('netease', s.quality)
+    s.setQuality(next)
+    expect(s.quality).toBe('flac')
+    expect(qualitiesFor('netease').some((x) => x.v === s.quality)).toBe(true)
+    expect(isQualityFor('netease', s.quality)).toBe(true)
+    // 幂等：已回落到位时不再产生第二次改动（否则 watch 会自激循环）
+    expect(resolveQuality('netease', s.quality)).toBe(s.quality)
   })
 })
