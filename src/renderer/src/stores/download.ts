@@ -42,6 +42,32 @@ export interface UiQueueJob {
   finalQuality?: string
 }
 
+/** 「下载整张」的确认文案（QQ 歌曲页与网易云内联页共用一处措辞，见 App.vue / NeteaseTab.vue：
+ *  两处各写一遍会漂成两个承诺，而这句话是给用户的契约）。
+ *  只在**本页已加载曲目少于整张**时用。必须与主进程的判据一致（AlbumBundle.discTotals）：
+ *  残缺批次不产出 album.cue（不是「产出一份只指前几首的 cue」），程序也不会替用户去取没加载的曲目，
+ *  补齐的唯一路子是加载完剩余曲目后再点一次。0.7.0 计划稿里那句「.cue 要等整张下齐才生成」
+ *  说的像是「稍等就有」，实际是「这批永远没有」——照旧写会把人留在原地等一个不会出现的文件。
+ *  用 \n 分行：Electron 的 window.confirm 按纯文本渲染，糊成一长句读不完。 */
+export function albumPartialConfirm(album: UiAlbumBundle, loaded: number): string {
+  const total = album.totalTracks
+  return [
+    `《${album.name}》共 ${total} 首，本页当前只加载了 ${loaded} 首（专辑页是滚动懒加载的，没加载的曲目这里不会替你去取）。`,
+    `现在下载只会下这 ${loaded} 首：音频与 cover.jpg 照常落进专辑目录，但 album.cue 不会生成。`,
+    `cue 要整张 ${total} 首全部下齐才写——只指着 ${loaded} 首的 cue 会让播放器把这张专辑呈现成 ${loaded} 首。`,
+    `要拿到 cue：把本页滚到底加载完剩余曲目，再点一次「下载整张」（本页全部已加载曲目会一起重新入队，已下过的会再多落一份）。`,
+    '要继续吗？',
+  ].join('\n')
+}
+
+/** 入队后的回显：整张与残缺两种说法必须不同——残缺那句不写明「这批没有 cue」，
+ *  用户就会在专辑目录里找一个根本不会出现的文件。 */
+export function albumEnqueuedNotice(album: UiAlbumBundle, loaded: number): string {
+  return loaded < album.totalTracks
+    ? `已加入 ${loaded} 首（《${album.name}》共 ${album.totalTracks} 首）：这一批不会有 album.cue，加载完剩余曲目后再点一次「下载整张」补齐`
+    : `已把整张《${album.name}》${loaded} 首加入下载队列（每碟全部落盘后自动生成本碟 album.cue）`
+}
+
 export const useDownloadStore = defineStore('download', {
   state: () => ({
     tracks: [] as UiTrack[],

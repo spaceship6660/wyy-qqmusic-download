@@ -1236,6 +1236,13 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     ]
   }
 
+  /** 一张 n 首的单碟专辑曲目：专辑页是懒加载的，`nTracks(10).slice(0, 2)` 就是「没往下滚」那一页 */
+  function nTracks(n: number): TrackDTO[] {
+    return Array.from({ length: n }, (_, i): TrackDTO => ({
+      id: `a${i + 1}`, name: `t${i + 1}`, artist: 'S', album: 'A', cover: '', trackNo: i + 1, disc: 1,
+    }))
+  }
+
   // 附属文件是 jobDone **之后**的异步写入：断言「不该有的东西确实没有」之前先等这一轮收尾，
   // 否则「还没写到」会被读成「写漏了也没关系」的假绿。
   const settle = async (ms = 400): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -1326,15 +1333,15 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     expect(env.events.failed).toBe(1)   // 失败的那首没被算进完成度
   })
 
+  // 10/12 首串行入队的用例：全局 testTimeout 20s 在慢机上偏紧（每个任务约 1s，含 cover 抓取），
+  // 这两条单独放宽到 30s，waitFor 的上限跟着对齐，别让「超时」看起来像功能坏了。
   it('懒加载回归：10 首专辑只入队 2 首（都成功）→ 盘上只有音频和 cover，没有 cue；补齐 8 首才出 10 FILE', async () => {
     // 这条锁的是 0.7.0 唯一的「专辑封装」承诺：cue 只在整碟真地下齐时写。
     // 完成度若按入队曲目数判（Task 12 评审发现的洞），前两首一成功就被当成「整张」，
     // 盘上留下一份 2 FILE 的 cue，foobar2000 会把这张 10 首专辑呈现成 2 首——比没有 cue 更糟。
     const env = await makeEnv({ coverBytes: JPEG })
     const album = bundle(1, COVER, { 1: 10 })   // 专辑真实有 10 首（discTotals 由解析层从完整列表算出）
-    const all = Array.from({ length: 10 }, (_, i): TrackDTO => ({
-      id: `a${i + 1}`, name: `t${i + 1}`, artist: 'S', album: 'A', cover: '', trackNo: i + 1, disc: 1,
-    }))
+    const all = nTracks(10)
     const albumDir = path.join(env.dl, ROOT)
 
     // 用户开页后没往下滚：TrackGrid 只给了前 2 首，「下载整张」就只入队这 2 首
@@ -1348,7 +1355,7 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
 
     // 滚到底后再点一次：补齐余下 8 首 → 这一碟才真的下齐，cue 出现且是 10 个 FILE
     env.app.enqueue({ tracks: all.slice(2), quality: '320', source: 'qq', album })
-    await waitFor(() => env.events.done >= 10)
+    await waitFor(() => env.events.done >= 10, 25000)
     await waitFor(() => fs.existsSync(path.join(albumDir, 'album.cue')))
     const text = fs.readFileSync(path.join(albumDir, 'album.cue'), 'utf-8')
     expect(cueFiles(text, albumDir)).toHaveLength(10)
@@ -1358,7 +1365,33 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     expect(fs.readdirSync(albumDir).sort()).toEqual(
       [...all.map((x, i) => `${String(i + 1).padStart(2, '0')} ${x.name}.mp3`), 'album.cue', 'cover.jpg'].sort(),
     )
-  })
+  }, 30000)
+
+  it('残缺批次之后重新整张入队（Task 13 按钮的真实动作）→ cue 照样补得出来，FILE 全指向盘上存在的文件', async () => {
+    // 「下载整张」每次入队的是**本页全部已加载曲目**而不是「还差的那几首」，所以先下的两首会再落一份
+    // （uniquePath 加 (1)）。这条测的是残缺批次留在盘上的状态不会挡住后来的整张入队：
+    // 已有的账不丢、新落盘名跟着进 cue——这是用户实际会走的那条恢复路径。
+    const env = await makeEnv({ coverBytes: JPEG })
+    const album = bundle(1, COVER, { 1: 10 })
+    const all = nTracks(10)
+    const albumDir = path.join(env.dl, ROOT)
+    env.app.enqueue({ tracks: all.slice(0, 2), quality: '320', source: 'qq', album })
+    await waitFor(() => env.events.done >= 2)
+    await waitFor(() => fs.existsSync(path.join(albumDir, 'cover.jpg')))
+    await settle()
+    expect(fs.existsSync(path.join(albumDir, 'album.cue'))).toBe(false)
+
+    env.app.enqueue({ tracks: all, quality: '320', source: 'qq', album })
+    await waitFor(() => env.events.done >= 12, 25000)
+    await waitFor(() => fs.existsSync(path.join(albumDir, 'album.cue')))
+    const text = fs.readFileSync(path.join(albumDir, 'album.cue'), 'utf-8')
+    // 前两首第二轮撞名 → cue 指新名；旧的 '01 t1.mp3' 也在盘上，但 cue 只认最新那一笔账
+    expect(cueFiles(text, albumDir)).toEqual([
+      '01 t1(1).mp3:MP3', '02 t2(1).mp3:MP3', '03 t3.mp3:MP3', '04 t4.mp3:MP3', '05 t5.mp3:MP3',
+      '06 t6.mp3:MP3', '07 t7.mp3:MP3', '08 t8.mp3:MP3', '09 t9.mp3:MP3', '10 t10.mp3:MP3',
+    ])
+    expect(text).not.toContain('FILE "01 t1.mp3"')
+  }, 30000)
 
   it('第二次整张下载 → 新产物带 (1)，cue 的 FILE 跟着换成新名字且仍全部存在', async () => {
     const env = await makeEnv({ coverBytes: JPEG })

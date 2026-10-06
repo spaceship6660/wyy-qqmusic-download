@@ -9,7 +9,7 @@ import DecryptTab from './components/DecryptTab.vue'
 import DownloadPage from './components/DownloadPage.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
 import DownloadFloatCard from './components/DownloadFloatCard.vue'
-import { useDownloadStore } from './stores/download'
+import { useDownloadStore, albumPartialConfirm, albumEnqueuedNotice } from './stores/download'
 import type { UiTrack, UiAlbumBundle } from './stores/download'
 import { api } from './api'
 
@@ -762,6 +762,38 @@ function onContentScroll(e: Event): void {
 }
 
 // ---------- 下载 ----------
+/** 「下载整张」按钮文案：本页没翻完时把两个数都写出来——按钮不该假装自己就是整张。
+ *  （完成度按专辑真实曲目数判，见 AlbumBundle.discTotals，残缺批次不会生成 cue，文案不许给反承诺） */
+const albumButtonLabel = computed(() => {
+  const a = songsView.value?.album
+  if (!a) return '下载整张'
+  const loaded = store.tracks.length
+  return loaded < a.totalTracks
+    ? `下载整张（已加载 ${loaded} / ${a.totalTracks} 首）`
+    : `下载整张（${loaded} 首）`
+})
+
+/** 整张下载：忽略勾选，把本页**已加载**的全部曲目 + 批次上下文一起入队 → 落专辑子目录，
+ *  档位/歌词用当前批次选项（store.quality / store.lyricMode），不另开一套参数。
+ *  没翻完时先确认再入队（albumPartialConfirm 说清「这批不会有 album.cue」），
+ *  不静默假装下完了整张；也不自动去取没加载的曲目——取剩下那些要翻页请求，超出本功能范围。 */
+function enqueueWholeAlbum(album: UiAlbumBundle, tracks: UiTrack[]): void {
+  if (!tracks.length || queueing.value) return
+  if (tracks.length < album.totalTracks && !window.confirm(albumPartialConfirm(album, tracks.length))) return
+  queueing.value = true
+  void api.invoke('dl:enqueue', {
+    tracks, quality: store.quality, lyricMode: store.lyricMode, source: album.source, album,
+  }).then(() => {
+    listNotice.value = albumEnqueuedNotice(album, tracks.length)
+    // 与勾选下载一致：不跳页，进度看底部工具栏「下载中 N」，左上浮卡自动弹出
+    dlCardCollapsed.value = false
+  }).catch((e: unknown) => {
+    window.alert(e instanceof Error ? e.message : String(e))
+  }).finally(() => {
+    queueing.value = false
+  })
+}
+
 async function downloadSelected(): Promise<void> {
   if (queueing.value || selectedCount.value === 0) return
   queueing.value = true
@@ -958,6 +990,15 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
             :disabled="listLoading || loadingMore"
             @click="reloadSongs()"
           >↻ 刷新</button>
+          <!-- 整张入口只在专辑页给：trackSource 与专辑不同源时列表不是这张专辑的曲目，
+               此时入队会把别处的歌写进专辑目录（勾选下载按 ctxSource 走源，不受这个约束） -->
+          <button
+            v-if="songsView.album && store.trackSource === songsView.album.source"
+            class="back-btn"
+            :disabled="!store.tracks.length || queueing"
+            :title="`下载该专辑${songsView.album.totalTracks} 首到专辑子目录（忽略当前勾选；档位按上方选择条）`"
+            @click="enqueueWholeAlbum(songsView.album, store.tracks)"
+          >{{ albumButtonLabel }}</button>
         </div>
         <!-- 首屏加载遮罩：转圈 + 明确文案（此前只有顶部一行小字，滚到底部时看不见，像卡死） -->
         <div v-if="listLoading && store.tracks.length === 0" class="loading-mask">

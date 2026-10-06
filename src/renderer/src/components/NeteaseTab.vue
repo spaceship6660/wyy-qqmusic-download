@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
-import { useDownloadStore } from '../stores/download'
+import { useDownloadStore, albumPartialConfirm, albumEnqueuedNotice } from '../stores/download'
 import type { UiAlbumBundle, UiTrack } from '../stores/download'
 import { api } from '../api'
 
@@ -40,12 +40,50 @@ function cachePut<K, V>(m: Map<K, V>, k: K, v: V, max = 30): void {
 const openedAlbum = ref('')
 /** 当前内联展开的专辑元数据（Task 13 的「下载整张」用；非专辑列表时为 null） */
 const openedAlbumBundle = ref<UiAlbumBundle | null>(null)
+/** 整张入队进行中（按钮置灰用；与 busy 分开——busy 的文案挂在搜索按钮上） */
+const queueing = ref(false)
+/** 入队回显（专辑视图内的一行提示；error 是红字，报喜不该借用它） */
+const notice = ref('')
+
+/** 「下载整张」按钮文案：本页曲目少于整张时把两个数都写出来（QQ 侧同名 computed 同一口径）。
+ *  网易云专辑页一次给全，正常走不到「已加载 x / y」这一支，留着是因为 store.tracks 是全仓共享列表，
+ *  万一被别的来源改过，按钮不许假装自己下的就是整张。 */
+const albumButtonLabel = computed(() => {
+  const a = openedAlbumBundle.value
+  if (!a) return '下载整张'
+  const loaded = store.tracks.length
+  return loaded < a.totalTracks
+    ? `下载整张（已加载 ${loaded} / ${a.totalTracks} 首）`
+    : `下载整张（${loaded} 首）`
+})
 
 /** 收起内联专辑视图。bundle 必须与 openedAlbum 同步清空：只清标题的话，列表已经换成搜索结果
  *  或别的专辑了，持有的批次上下文却还是上一张的——整张下载会写进错误的专辑目录。 */
 function closeAlbum(): void {
   openedAlbum.value = ''
   openedAlbumBundle.value = null
+  notice.value = ''
+}
+
+/** 整张下载：忽略勾选，把本页全部曲目 + 批次上下文一起入队 → 落专辑子目录，
+ *  档位/歌词用当前批次选项（store.quality / store.lyricMode）。
+ *  bundle 从 openedAlbumBundle 现取（与按钮的 v-if 同一份状态，不靠模板传参做可空收窄）；
+ *  列表读 store.tracks——与 App.vue 的同名动作只差在这里的专辑是内联展开的、不经过 songsView。 */
+function enqueueWholeAlbum(): void {
+  const album = openedAlbumBundle.value
+  const tracks = store.tracks
+  if (!album || !tracks.length || queueing.value) return
+  if (tracks.length < album.totalTracks && !window.confirm(albumPartialConfirm(album, tracks.length))) return
+  queueing.value = true
+  void api.invoke('dl:enqueue', {
+    tracks, quality: store.quality, lyricMode: store.lyricMode, source: 'netease', album,
+  }).then(() => {
+    notice.value = albumEnqueuedNotice(album, tracks.length)
+  }).catch((e: unknown) => {
+    error.value = e instanceof Error ? e.message : String(e)
+  }).finally(() => {
+    queueing.value = false
+  })
 }
 
 async function refreshAuth(): Promise<void> {
@@ -217,7 +255,15 @@ onUnmounted(() => {
       <div class="songs-head">
         <button class="ghost" @click="closeAlbum()">‹ 返回专辑列表</button>
         <span class="songs-title">专辑 · {{ openedAlbum }}（{{ store.tracks.length }} 首）</span>
+        <button
+          v-if="openedAlbumBundle"
+          class="ghost"
+          :disabled="!store.tracks.length || queueing"
+          title="下载该专辑全部曲目到专辑子目录（忽略当前勾选；档位按上方选择条）"
+          @click="enqueueWholeAlbum()"
+        >{{ albumButtonLabel }}</button>
       </div>
+      <p v-if="notice" class="notice">{{ notice }}</p>
       <TrackGrid
         :tracks="store.tracks"
         :selected-ids="store.selectedIds"
@@ -258,6 +304,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .import { display: flex; flex-direction: column; gap: 8px; }
 .import textarea { resize: vertical; font-family: inherit; padding: 8px; border: 1px solid #d0d0d0; border-radius: 6px; }
 .err { color: #d33; font-size: 13px; margin: 0; }
+.notice { color: #31c27c; font-size: 13px; margin: 0; }
 .tools { display: flex; gap: 8px; }
 .tools input { flex: 1; padding: 6px 12px; border: 1px solid #d0d0d0; border-radius: 6px; font-size: 14px; }
 .search-tabs { display: flex; gap: 6px; }

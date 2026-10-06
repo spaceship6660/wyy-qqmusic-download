@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useDownloadStore } from '../src/renderer/src/stores/download'
+import { useDownloadStore, albumPartialConfirm, albumEnqueuedNotice } from '../src/renderer/src/stores/download'
 import type { UiAlbumBundle, UiTrack, UiQuality } from '../src/renderer/src/stores/download'
 import { isQualityFor, labelForQuality, qualitiesFor } from '../src/renderer/src/qualityOptions'
 // 跨边界只取纯 .ts 常量：vitest 是 node 环境，主进程的档位表能在测试里直接对照
@@ -221,5 +221,46 @@ describe('档位表跨层同集（选择器 ↔ 主进程降级链）', () => {
     // 镜像类型少一个字段（或主进程把某字段改成可选）时，双向可赋仍成立、只有同集断言会红。
     const tied: Exactly<UiAlbumBundle, AlbumBundle> = true
     expect(tied).toBe(true)
+  })
+})
+
+// ---------- Task 13：「下载整张」的文案 ----------
+// .vue 挂不起来（vitest 是 node 环境、无 jsdom，`<script setup>` 也导不出可 import 的东西），
+// 所以这里钉的是两个组件**真正 import 的那两个生产函数**——文案只此一份，
+// App.vue 与 NeteaseTab.vue 里只剩 {{ }} 与 @click，不再写一遍断言模板复制品。
+describe('「下载整张」文案（0.7.0 Task 13）', () => {
+  const album: UiAlbumBundle = {
+    source: 'qq', id: 'm1', name: '奇爱人生 LOVE ELEGIA', artist: '阿良良木健',
+    date: '2019-05-20', company: '', coverUrl: '', totalTracks: 10, discs: [1], discTotals: { 1: 10 },
+  }
+
+  it('残缺批次确认：说死「这批不生成 album.cue」并给出补齐路子', () => {
+    const s = albumPartialConfirm(album, 2)
+    expect(s).toContain('奇爱人生 LOVE ELEGIA')   // 队列里多张专辑时只能靠名字分辨
+    expect(s).toContain('共 10 首')               // 已加载数与专辑真实数都要出现
+    expect(s).toContain('只加载了 2 首')
+    expect(s).toContain('album.cue 不会生成')
+    expect(s).toContain('再点一次「下载整张」')
+    // 计划稿原文是「.cue 要等整张下齐才生成」——听着像「稍等就有」，实际这批永远没有，
+    // 不许把那句错误的承诺写回来。
+    expect(s).not.toContain('要等整张下齐才生成')
+    // 也不许许诺「自动把剩下的下完」：没加载的曲目本版本不去取
+    expect(s).not.toMatch(/自动(加载|补齐|下载)/)
+    expect(s.split('\n').length).toBeGreaterThanOrEqual(4)  // confirm 是纯文本，不分行读不完
+  })
+
+  it('入队回显两种说法：残缺那句必须带着「这批没有 cue」，整张那句不许留悬念', () => {
+    const partial = albumEnqueuedNotice(album, 2)
+    expect(partial).toContain('2 首')
+    expect(partial).toContain('共 10 首')
+    expect(partial).toContain('不会有 album.cue')
+    const full = albumEnqueuedNotice(album, 10)
+    expect(full).toContain('整张')
+    expect(full).not.toContain('不会有')
+  })
+
+  it('多碟专辑的整张回显不承诺「一张 cue」：每碟各写一份（spec §5.5）', () => {
+    const multi: UiAlbumBundle = { ...album, discs: [1, 2], discTotals: { 1: 6, 2: 4 } }
+    expect(albumEnqueuedNotice(multi, 10)).toContain('本碟 album.cue')
   })
 })
