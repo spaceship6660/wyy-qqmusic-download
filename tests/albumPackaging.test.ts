@@ -7,7 +7,7 @@ import type { AlbumBundle } from '../src/main/albumBundle'
 
 const B: AlbumBundle = {
   source: 'netease', id: '7', name: '奇爱人生 LOVE ELEGIA', artist: '阿良良木健',
-  date: '2019-05-20', company: '', coverUrl: '', totalTracks: 2, discs: [1],
+  date: '2019-05-20', company: '', coverUrl: '', totalTracks: 2, discs: [1], discTotals: { 1: 2 },
 }
 const E: CueEntry[] = [
   { trackNo: 1, title: '告别曲（Love Elegia Ver.）', fileName: '01 告别曲（Love Elegia Ver.）.flac', container: 'FLAC' },
@@ -150,10 +150,64 @@ describe('renderCue', () => {
 // '01 t1(1).mp3'、容器可能被降级换成 mp3。所以这里断言的是「记账结果」，
 // 而不是「文件名能不能拼出来」——后者拼得出来恰恰是错的（指向了不存在的文件）。
 describe('AlbumPackager 完成度', () => {
-  const B1: AlbumBundle = { ...B, totalTracks: 2, discs: [1] }
-  const B2: AlbumBundle = { ...B, totalTracks: 2, discs: [1, 2] }
+  const B1: AlbumBundle = { ...B, totalTracks: 2, discs: [1], discTotals: { 1: 2 } }
+  const B2: AlbumBundle = { ...B, totalTracks: 2, discs: [1, 2], discTotals: { 1: 1, 2: 1 } }
+  // 一张 10 首的单碟专辑：懒加载页只会入队其中一部分，完成度必须按这里的 10 判
+  const B10: AlbumBundle = { ...B, totalTracks: 10, discs: [1], discTotals: { 1: 10 } }
   const done = (trackNo: number, fileName: string, title: string, ext = 'flac') =>
     ({ trackNo, outputPath: fileName, ext, title })
+
+  it('专辑 10 首、只入队 2 首且都成功 → 不算下齐、不出 cue（0.7.0 评审的核心用例）', () => {
+    // 判据若取入队曲目数（旧行为），这两首就是「整碟」，盘上会留下一份 2 FILE 的 cue，
+    // foobar2000 把这张 10 首专辑呈现成 2 首——比没有 cue 更糟（spec §5.5）。
+    const p = new AlbumPackager()
+    p.plan(B10, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    expect(p.record(B10, done(1, '01 a.flac', 'a'))).toEqual([])
+    expect(p.record(B10, done(2, '02 b.flac', 'b'))).toEqual([])
+    expect(p.cueEntries(B10, 1)).toEqual([])
+  })
+
+  it('补齐剩下的 8 首（第二次 plan 合并期望）→ cue 出现且含 10 个 FILE', () => {
+    // 用户滚到底再点「下载整张」是同一 session 的第二次入队：期望表必须合并而不是重建，
+    // 否则前两首被后面八首顶掉，永远配不齐。
+    const p = new AlbumPackager()
+    p.plan(B10, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    p.record(B10, done(1, '01 a.flac', 'a'))
+    p.record(B10, done(2, '02 b.flac', 'b'))
+    p.plan(B10, Array.from({ length: 8 }, (_, i) => ({ trackNo: i + 3, disc: 1 })))
+    for (let no = 3; no < 10; no++) expect(p.record(B10, done(no, `0${no} x.flac`, 'x'))).toEqual([])
+    expect(p.record(B10, done(10, '10 z.flac', 'z'))).toEqual([1])
+    const entries = p.cueEntries(B10, 1)
+    expect(entries).toHaveLength(10)
+    expect(entries.map((e) => e.trackNo)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    // 前两首仍是第一次入队那两笔账（旧落盘名不能因为第二次没提交它们就丢）
+    expect(entries.map((e) => e.fileName)).toEqual([
+      '01 a.flac', '02 b.flac', '03 x.flac', '04 x.flac', '05 x.flac',
+      '06 x.flac', '07 x.flac', '08 x.flac', '09 x.flac', '10 z.flac',
+    ])
+    expect(renderCue(B10, entries)).not.toBeNull()
+  })
+
+  it('多碟：每碟各自按 discTotals 判齐，CD01 下齐不等 CD02', () => {
+    // 专辑共 4 首、两碟各 2 首。只把 CD01 的两首下完就该有 CD01 的 cue（旧实现同样成立，
+    // 这里锁的是「判据换成 discTotals 后各碟互不拖累」）。
+    const B4: AlbumBundle = { ...B, totalTracks: 4, discs: [1, 2], discTotals: { 1: 2, 2: 2 } }
+    const p = new AlbumPackager()
+    p.plan(B4, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])
+    expect(p.record(B4, done(1, '01 a.flac', 'a'))).toEqual([])
+    expect(p.record(B4, done(2, '02 b.flac', 'b'))).toEqual([1])
+    expect(p.cueEntries(B4, 2)).toEqual([])
+  })
+
+  it('disc 不在 discTotals 里（入队了不属于这张专辑这一碟的曲）→ 不抛、永不判齐', () => {
+    // 真实数据走不到这条（bundle 与 tracks 同一次解析产出）；走到了说明两处对不上，
+    // 此时凭猜测决定这张专辑有几首比不出 cue 更糟。
+    const p = new AlbumPackager()
+    p.plan(B1, [{ trackNo: 1, disc: 3 }, { trackNo: 2, disc: 1 }])
+    expect(p.record(B1, done(1, '03 a.flac', 'a'))).toEqual([])
+    expect(p.cueEntries(B1, 3)).toEqual([])
+    expect(() => p.cueEntries(B1, 99)).not.toThrow()
+  })
 
   it('单碟：未下齐不出 cue，下齐返回该碟', () => {
     const p = new AlbumPackager()

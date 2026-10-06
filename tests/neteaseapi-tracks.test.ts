@@ -235,6 +235,27 @@ describe('neAlbumInfo（0.7.0 专辑封装）', () => {
     expect(r.tracks.map((x) => x.trackNo)).toEqual([1, 2, 3, 7])
     expect(r.tracks.map((x) => x.disc)).toEqual([1, 1, 1, 2])
     expect(r.bundle.discs).toEqual([1, 2])
+    // discTotals 按整张的 songs 数组数出来（cue 的完成度判据）：这里 CD01 三首、CD02 一首
+    expect(r.bundle.discTotals).toEqual({ 1: 3, 2: 1 })
+  })
+
+  it('单碟专辑 → discTotals { 1: 曲目数 } = totalTracks（整张下载的主路径）', async () => {
+    const songs = [
+      { id: 1, name: 'A', no: 1, cd: '01' },
+      { id: 2, name: 'B', no: 2, cd: '01' },
+      { id: 3, name: 'C', no: 3, cd: '01' },
+    ]
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
+    expect(r.bundle.discTotals).toEqual({ 1: 3 })
+    expect(r.bundle.discTotals[1]).toBe(r.bundle.totalTracks)
+  })
+
+  it('脏条目被丢弃后 discTotals 仍与 tracks 实长一致（不能按 songs 原始位置计数）', async () => {
+    // 解析会丢掉没有 id 的条目；期望数若按原始下标算，就会要求一首不存在的曲目落盘、cue 永不出不来
+    const songs = [{ id: 1, name: 'A' }, { name: '无 id' }, { id: 3, name: 'C' }]
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
+    expect(r.tracks.length).toBe(2)
+    expect(r.bundle.discTotals).toEqual({ 1: 2 })
   })
 
   it('曲目映射逐字段仍是 neteaseTrackToDto 的产物（spread 只加 trackNo/disc）', async () => {

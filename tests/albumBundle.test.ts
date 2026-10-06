@@ -84,6 +84,33 @@ describe('mkBundle', () => {
     expect(b.discs).toEqual([1])
     expect(b.totalTracks).toBe(2)
   })
+
+  it('discTotals：单碟 = { 1: totalTracks }（整张下载是常见情形，这条断了 cue 就永远出不来）', () => {
+    const b = mkBundle('qq', 'm3', 'A', 'S', '', '', '', [t('a', 'x', 1, 1), t('b', 'y', 2, 1), t('c', 'z', 3)])
+    expect(b.discTotals).toEqual({ 1: 3 })
+    expect(b.discTotals[1]).toBe(b.totalTracks)
+  })
+
+  it('discTotals：多碟按碟计数，键集与 discs 同集（完成度按碟查，查不到就永不判齐）', () => {
+    // 数组顺序故意打乱：曲目序与碟号无关，计数得按碟号归堆
+    const b = mkBundle('qq', 'm4', 'A', 'S', '', '', '',
+      [t('a', 'x', 1, 2), t('b', 'y', 2, 1), t('c', 'z', 3, 1), t('d', 'w', 4, 3)])
+    expect(b.discs).toEqual([1, 2, 3])
+    expect(b.discTotals).toEqual({ 1: 2, 2: 1, 3: 1 })
+    expect(Object.keys(b.discTotals).sort()).toEqual([...b.discs].map(String).sort())
+    expect(Object.values(b.discTotals).reduce((x, y) => x + y, 0)).toBe(b.totalTracks)
+  })
+
+  it('discTotals 是普通对象而不是 Map（要过 IPC 的 JSON 净化，Map 会静默变 undefined）', () => {
+    const b = mkBundle('qq', 'm5', 'A', 'S', '', '', '', [t('a', 'x', 1, 1), t('b', 'y', 2, 1)])
+    expect(JSON.parse(JSON.stringify(b)).discTotals).toEqual({ 1: 2 })
+    // 数字键往返后是字符串，按 number 下标取仍命中（AlbumPackager 就是这么查的）
+    expect(JSON.parse(JSON.stringify(b)).discTotals[1]).toBe(2)
+  })
+
+  it('空专辑 → discTotals 为 {}（没有曲目就没有任何一碟的期望数，不能让下游拿到 undefined）', () => {
+    expect(mkBundle('netease', '7', 'A', 'S', '', '', '', []).discTotals).toEqual({})
+  })
 })
 
 describe('命名', () => {

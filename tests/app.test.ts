@@ -927,11 +927,11 @@ describe('专辑 IPC 形状（0.7.0）', () => {
     },
   })
 
-  it('qqAlbumSongs 返回 { tracks, album }，album 带 totalTracks/discs', async () => {
+  it('qqAlbumSongs 返回 { tracks, album }，album 带 totalTracks/discs/discTotals', async () => {
     const app = albumApp([['fcg_v8_album_info_cp', QQ_ONE_TRACK]])
     const r: any = await app.qqAlbumSongs('m1')
     expect(r.tracks).toHaveLength(1)
-    expect(r.album).toMatchObject({ source: 'qq', id: 'm1', totalTracks: 1, discs: [1] })
+    expect(r.album).toMatchObject({ source: 'qq', id: 'm1', totalTracks: 1, discs: [1], discTotals: { 1: 1 } })
     // 曲目级序号必须一起过 IPC：渲染侧把它原样带回 dl:enqueue，丢了整张专辑会全部命名成
     // '01 曲名' 互相撞名（Task 10 才落盘，坏在这里看不出来）
     expect(r.tracks[0]).toMatchObject({ trackNo: 1, disc: 1 })
@@ -950,7 +950,7 @@ describe('专辑 IPC 形状（0.7.0）', () => {
     const app = albumApp([['/api/v1/album/', body]])
     const r: any = await app.neAlbumSongs(7)
     expect(r.tracks).toHaveLength(1)
-    expect(r.album).toMatchObject({ source: 'netease', id: '7', totalTracks: 1 })
+    expect(r.album).toMatchObject({ source: 'netease', id: '7', totalTracks: 1, discTotals: { 1: 1 } })
     expect(r.tracks[0]).toMatchObject({ trackNo: 1, disc: 1 })
     expect(structuredClone(r)).toEqual(r)
   })
@@ -999,11 +999,15 @@ describe('专辑 IPC 形状（0.7.0）', () => {
       const r: any = await albumApp([['fcg_v8_album_info_cp', body]]).qqAlbumSongs('m-x')
       expect(r.tracks).toEqual([])
       expect(r.album).toMatchObject({ source: 'qq', name: '未知专辑', artist: '未知歌手', totalTracks: 0, discs: [1] })
+      // 0 首 → discTotals 是空对象（不是 { 1: 0 }）：AlbumPackager 查不到碟号就永不判齐，
+      // 空专辑不可能有曲目入账，这里只需保证 IPC 带得出去这个形状（Record 不是 Map）
+      expect(r.album.discTotals).toEqual({})
     }
     for (const body of ['{}', '{"code":200}', '{"album":{}}', '{"album":{"publishTime":null},"songs":null}']) {
       const r: any = await albumApp([['/api/v1/album/', body]]).neAlbumSongs(9)
       expect(r.tracks).toEqual([])
       expect(r.album).toMatchObject({ source: 'netease', id: '9', name: '未知专辑', artist: '未知歌手', totalTracks: 0, discs: [1] })
+      expect(r.album.discTotals).toEqual({})
     }
     // 有专辑名但零曲目：名字照留，只按实长算 0 首（Task 6/7 已定的口径，透传不得改成回退名）
     const named: any = await albumApp([['fcg_v8_album_info_cp', '{"data":{"name":"空专辑","mid":"m-y"}}']]).qqAlbumSongs('m-y')
@@ -1026,12 +1030,20 @@ describe('专辑落盘路径（0.7.0）', () => {
   const withoutExtras = (dir: string): string[] =>
     fs.readdirSync(dir).filter((f) => f !== 'album.cue' && !/^cover\.(jpg|png)$/.test(f))
 
-  // bundle 用字面量而非 mkBundle：discs/totalTracks 是本用例要依赖的输入，写死才看得出改了哪。
+  // bundle 用字面量而非 mkBundle：discs/totalTracks/discTotals 是本用例要依赖的输入，写死才看得出改了哪。
   function bundle(discs = 1, totalTracks = 2 * discs): AlbumBundle {
+    // discTotals 是 cue 的完成度判据（Task 12 之后 plan 不再按入队曲目数判齐）。
+    // 本组用例只锁目录与文件名，但仍要让 bundle 自洽：按碟轮流均分，单碟时即 { 1: totalTracks }。
+    const discTotals: Record<number, number> = {}
+    for (let i = 0; i < totalTracks; i++) {
+      const d = (i % discs) + 1
+      discTotals[d] = (discTotals[d] ?? 0) + 1
+    }
     return {
       source: 'qq', id: 'm1', name: 'A', artist: 'S', date: '2019-01-02',
       company: 'C', coverUrl: '', totalTracks,
       discs: Array.from({ length: discs }, (_, i) => i + 1),
+      discTotals,
     }
   }
 
@@ -1204,11 +1216,16 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
   const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('cover-body')])
   const COVER = 'http://cover.test/cover.jpg'
 
-  function bundle(discs = 1, coverUrl = COVER): AlbumBundle {
+  /** 专辑批次：cue 的完成度判据取自 discTotals（这张专辑每碟真实几首），默认与 tracks() 给的 2 首对齐。
+   *  totalTracks 由 discTotals 求和——两处不一致就是自造事实（mkBundle 那边也是这么算的）。
+   *  需要「入队子集 ≠ 整张」的用例（懒加载回归）单独传 totals。 */
+  function bundle(discs = 1, coverUrl = COVER, discTotals: Record<number, number> = discs === 1 ? { 1: 2 } : { 1: 1, 2: 1 }): AlbumBundle {
     return {
       source: 'qq', id: 'm1', name: 'A', artist: 'S', date: '2019-01-02',
-      company: 'C', coverUrl, totalTracks: 2,
+      company: 'C', coverUrl,
+      totalTracks: Object.values(discTotals).reduce((x, y) => x + y, 0),
       discs: Array.from({ length: discs }, (_, i) => i + 1),
+      discTotals,
     }
   }
 
@@ -1309,6 +1326,40 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     expect(env.events.failed).toBe(1)   // 失败的那首没被算进完成度
   })
 
+  it('懒加载回归：10 首专辑只入队 2 首（都成功）→ 盘上只有音频和 cover，没有 cue；补齐 8 首才出 10 FILE', async () => {
+    // 这条锁的是 0.7.0 唯一的「专辑封装」承诺：cue 只在整碟真地下齐时写。
+    // 完成度若按入队曲目数判（Task 12 评审发现的洞），前两首一成功就被当成「整张」，
+    // 盘上留下一份 2 FILE 的 cue，foobar2000 会把这张 10 首专辑呈现成 2 首——比没有 cue 更糟。
+    const env = await makeEnv({ coverBytes: JPEG })
+    const album = bundle(1, COVER, { 1: 10 })   // 专辑真实有 10 首（discTotals 由解析层从完整列表算出）
+    const all = Array.from({ length: 10 }, (_, i): TrackDTO => ({
+      id: `a${i + 1}`, name: `t${i + 1}`, artist: 'S', album: 'A', cover: '', trackNo: i + 1, disc: 1,
+    }))
+    const albumDir = path.join(env.dl, ROOT)
+
+    // 用户开页后没往下滚：TrackGrid 只给了前 2 首，「下载整张」就只入队这 2 首
+    env.app.enqueue({ tracks: all.slice(0, 2), quality: '320', source: 'qq', album })
+    await waitFor(() => env.events.done >= 2)
+    await waitFor(() => fs.existsSync(path.join(albumDir, 'cover.jpg')))
+    await settle()
+    expect(env.events.failed).toBe(0)   // 两首都成功，仍不该有 cue
+    expect(fs.readdirSync(albumDir).sort()).toEqual(['01 t1.mp3', '02 t2.mp3', 'cover.jpg'])
+    expect(fs.existsSync(path.join(albumDir, 'album.cue'))).toBe(false)
+
+    // 滚到底后再点一次：补齐余下 8 首 → 这一碟才真的下齐，cue 出现且是 10 个 FILE
+    env.app.enqueue({ tracks: all.slice(2), quality: '320', source: 'qq', album })
+    await waitFor(() => env.events.done >= 10)
+    await waitFor(() => fs.existsSync(path.join(albumDir, 'album.cue')))
+    const text = fs.readFileSync(path.join(albumDir, 'album.cue'), 'utf-8')
+    expect(cueFiles(text, albumDir)).toHaveLength(10)
+    // 前两首是第一批落的名、后八首是第二批落的名：cue 必须都收（期望表是合并的，不是第二次重建）
+    expect(text).toContain('FILE "01 t1.mp3" MP3')
+    expect(text).toContain('FILE "10 t10.mp3" MP3')
+    expect(fs.readdirSync(albumDir).sort()).toEqual(
+      [...all.map((x, i) => `${String(i + 1).padStart(2, '0')} ${x.name}.mp3`), 'album.cue', 'cover.jpg'].sort(),
+    )
+  })
+
   it('第二次整张下载 → 新产物带 (1)，cue 的 FILE 跟着换成新名字且仍全部存在', async () => {
     const env = await makeEnv({ coverBytes: JPEG })
     env.app.enqueue({ tracks: tracks(), quality: '320', source: 'qq', album: bundle() })
@@ -1331,8 +1382,9 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
   it('降级换档（flac 直链 404 → 落 mp3）：cue 的容器与文件名都跟着实际落盘走', async () => {
     // 首解给 flac、该直链 404 → 重取拿到 320k。若 cue 的容器按**请求档位**写 FLAC，
     // 播放器就会拿 MP3 文件按 FLAC 索引——列表全绿、加载报错。
+    // 这张 bundle 是「一首的专辑」：入队这一首即整碟下齐，cue 才会写出来（否则本用例测的是完成度）。
     const env = await makeEnv({ purls: ['gone.flac', 'M800ok.mp3'], coverBytes: JPEG })
-    env.app.enqueue({ tracks: [tracks()[0]], quality: 'flac', source: 'qq', album: bundle() })
+    env.app.enqueue({ tracks: [tracks()[0]], quality: 'flac', source: 'qq', album: bundle(1, COVER, { 1: 1 }) })
     const albumDir = path.join(env.dl, ROOT)
     await waitFor(() => env.events.done >= 1)
     await waitFor(() => fs.existsSync(path.join(albumDir, 'album.cue')))

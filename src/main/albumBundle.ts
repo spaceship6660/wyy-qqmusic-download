@@ -17,6 +17,15 @@ export interface AlbumBundle {
   totalTracks: number   // 曲目数组**实长**——服务端 total_song_num 与 list.length 同一张专辑实测 21 vs 22
                         //（网易云 album.size 与 songs.length 实测一致），口径不统一就一律以实长为准
   discs: number[]       // 去重升序碟号；长度 1 即单碟。恒非空，下游可直接 discs[0]
+  /** 碟号 → 该碟在**这张专辑里**的曲目数（由完整曲目数组算出，与本次入队几首无关）。
+   *  键集与 discs 同集（discs 由同一份数据算出），单碟时 discTotals[1] === totalTracks。
+   *  为什么不让 cue 的完成度直接数入队曲目：专辑页是懒加载的（TrackGrid「加载更多」），
+   *  用户开了一张 10 首的专辑、没往下滚、只入队已加载的 2 首，按入队数判「齐」就会给这张
+   *  10 首的专辑写一份 2 FILE 的 cue——foobar2000 把它呈现成 2 首的专辑，比没有 cue 更糟
+   *  （spec §5.5 的立身之本；2026-10-07 Task 12 评审发现这条可达路径）。
+   *  必须是普通对象而不是 Map：本对象要过 IPC 的 JSON 净化与结构化克隆，Map 会被静默变成 undefined。
+   *  数字键在 JSON 往返后变字符串，取值时 JS 自动把下标转成字符串，所以按 disc（number）查仍然命中。 */
+  discTotals: Record<number, number>
 }
 
 /** 专辑接口的返回形状：一次请求同时给出批次上下文与带序号的曲目（Task 6/7 生产、Task 8 透传给渲染侧） */
@@ -64,6 +73,14 @@ export function mkBundle(
   date: string, company: string, coverUrl: string, tracks: TrackDTO[],
 ): AlbumBundle {
   const discs = [...new Set(tracks.map((x) => x.disc ?? 1))].sort((a, b) => a - b)
+  // 碟 → 该碟曲目数：与 discs 用同一个碟号算式（x.disc ?? 1），两处不一致就会出现
+  // 「discs 里有 2、discTotals 里查不到 2」这种自相矛盾的 bundle。
+  // 认不出的碟号（曲目不属于这张专辑）在 AlbumPackager 那边按「永不判齐」处理，见 discTotals 注释。
+  const discTotals: Record<number, number> = {}
+  for (const t of tracks) {
+    const d = t.disc ?? 1
+    discTotals[d] = (discTotals[d] ?? 0) + 1
+  }
   return {
     source, id,
     name: name || '未知专辑',
@@ -71,6 +88,7 @@ export function mkBundle(
     date, company, coverUrl,
     totalTracks: tracks.length,
     discs: discs.length ? discs : [1],
+    discTotals,
   }
 }
 

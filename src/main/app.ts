@@ -631,6 +631,8 @@ export function createApp(deps: AppDeps) {
       // 专辑批次：登记期望曲目，供完成度判定（无 album 时不调用 → 平铺下载零影响）。
       // 登记的是**去重后真正入队**的曲目而不是入参 tracks：同次入队里的重复 id 若占掉一个期望槽位，
       // 那一槽永远等不到落盘，整碟就再也出不了 cue。
+      // 这里只贡献 trackNo → 碟号；「这一碟该有几首」取自 album.discTotals（专辑真实曲目数），
+      // 否则懒加载页只入队了前两首也算「齐」，会写出一份把 10 首专辑呈成 2 首的 cue。
       if (album) packager.plan(album, jobs.map((j) => j.track))
       queue.enqueue(jobs)
       return true

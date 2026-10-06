@@ -29,6 +29,10 @@ export interface UiAlbumBundle {
   coverUrl: string
   totalTracks: number
   discs: number[]
+  /** 碟号 → 这张专辑该碟的真实曲目数（cue 完成度判据在主进程按它算，见 AlbumBundle.discTotals）。
+   *  渲染侧不读它，但必须原样带回去：漏这一个字段主进程就拿入队曲目数当期望数，
+   *  懒加载页只下了前两首也会写出「整张」cue。 */
+  discTotals: Record<number, number>
 }
 
 export interface UiQueueJob {

@@ -205,6 +205,8 @@ describe('fetchAlbumInfo（0.7.0 专辑封装）', () => {
     expect(r.bundle.coverUrl).toBe('https://y.gtimg.cn/music/photo_new/T002R500x500M000002xyz.jpg')
     expect(r.bundle.discs).toEqual([1, 2])
     expect(r.tracks.map((x) => x.disc)).toEqual([1, 2])
+    // discTotals：cue 完成度按这张专辑的真实每碟曲目数判，不是按用户入队了几首
+    expect(r.bundle.discTotals).toEqual({ 1: 1, 2: 1 })
   })
 
   it('totalTracks 用 list 实长，不信 total_song_num（实测同一张专辑 21 vs 22）', async () => {
@@ -232,6 +234,19 @@ describe('fetchAlbumInfo（0.7.0 专辑封装）', () => {
     const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
     expect(r.tracks.map((x) => x.disc)).toEqual([1, 1])
     expect(r.bundle.discs).toEqual([1])
+    // 单碟专辑：discTotals[1] 就是整张的曲目数（整张下载的主路径靠这个数判 cue）
+    expect(r.bundle.discTotals).toEqual({ 1: 2 })
+  })
+
+  it('list 有 10 首 → discTotals {1:10}（解析层看到的是整张，页面却只把前 2 首交给用户）', async () => {
+    // 2026-10-07 评审的洞就在这里：专辑页懒加载，完成度若按入队曲目数判，
+    // 只入队 2 首也会写出 2 FILE 的 cue。真实曲目数只有这里看得到，必须接进 bundle。
+    const list = Array.from({ length: 10 }, (_, i) => ({
+      songmid: `S${i}`, songname: `曲${i}`, albummid: '002m', cdIdx: 1,
+    }))
+    const r = await fetchAlbumInfo(mockAlbumClient(() => JSON.stringify({ data: { name: 'A', mid: '002m', list } })), '002m')
+    expect(r.bundle.totalTracks).toBe(10)
+    expect(r.bundle.discTotals).toEqual({ 1: 10 })
   })
 
   it('序号取数组下标 +1（服务端无序号字段，实测条目只有 belongCD/cdIdx）', async () => {
