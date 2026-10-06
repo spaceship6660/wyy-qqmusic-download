@@ -195,11 +195,24 @@ interface Env {
 
 const envs: Env[] = []
 
-afterEach(() => {
-  for (const e of envs.splice(0)) {
-    e.server.close()
-    fs.rmSync(e.dir, { recursive: true, force: true })
-  }
+/** 关掉本地 server 并等到回调真的来。
+ *  之前的写法是裸 close() 不 await：钩子当场放行，没关完的监听句柄与 keep-alive socket 叠到后面的
+ *  用例上——plan 的 Task 14 Step 3 记着这条本文件既有 flaky（偶发 `Hook timed out in 10000ms`），
+ *  0.7.0 的整张专辑用例又给它加了压，2026-10-07 一并收口。
+ *  server.close() 要「不再监听 + 所有在连连接都断开」才回调，而下载用的 fetch 是 keep-alive 的，
+ *  空闲 socket 要等服务端 keepAliveTimeout（默认 5s）才自己断——所以光 await 裸 close() 会把钩子
+ *  拖长，必须先用 closeAllConnections() 把手上的 socket 拆掉，回调必定到达。临时目录也才排到
+ *  「没有连接还挂在这个目录上」之后才删。 */
+const closeServer = (server: http.Server): Promise<void> =>
+  new Promise((resolve) => {
+    server.closeAllConnections()
+    server.close(() => resolve())
+  })
+
+afterEach(async () => {
+  const list = envs.splice(0)
+  await Promise.all(list.map((e) => closeServer(e.server)))
+  for (const e of list) fs.rmSync(e.dir, { recursive: true, force: true })
 })
 
 async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBroken?: boolean; purls?: string[]; lyricMode?: string; searchHits?: any[]; deadVkey?: boolean; failFirst?: Record<string, number>; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number>; neCdnFallbackUrls?: (url: string) => string[]; coverBytes?: Buffer; debugLogFile?: boolean } = {}): Promise<Env> {
@@ -575,7 +588,9 @@ describe('createApp runner 装配（T10 评审修复）', () => {
       expect(good.recorded).toEqual(['/ne.mp3']) // 换节点后一次命中
       expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3')).length).toBe(1)
     } finally {
-      good.server.close()
+      // 「可用节点」是本用例自己起的第二个 server：同样得 await 关闭，否则它绕过 afterEach 的
+      // 统一收尾，keep-alive socket 留到下一条用例的钩子里去超时
+      await closeServer(good.server)
     }
   })
 
@@ -1313,6 +1328,37 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     }
     expect(fs.readFileSync(path.join(root, 'CD01', 'album.cue'), 'utf-8')).toContain('01 t1.mp3')
     expect(fs.readFileSync(path.join(root, 'CD02', 'album.cue'), 'utf-8')).toContain('02 t2.mp3')
+  })
+
+  // Task 14 端到端补漏：上面那条多碟用例的曲目是全专辑连编（第 2 首就在第 2 碟），而 2CD 发行的
+  // 真实形态是**每碟从 1 重新编号**（网易云 songs[].no 正是这个语义）——两碟的落盘名都以 '01 ' 开头，
+  // 完成度表若只按曲序记 key，两碟就抢同一个槽，症状是「盘上一张 cue 都没有」而不是任务变红，
+  // 只有回到磁盘才测得出来（记账侧的同一件事见 albumPackaging.test.ts 的 (碟号, 曲序) 用例）。
+  it('多碟每碟重新编号（两碟都有第 1 首）→ 两碟各一份 cue、各 2 个 FILE，且互不引用隔壁碟的文件', async () => {
+    const env = await makeEnv({ coverBytes: JPEG })
+    // discTotals 每碟 2 首：判齐取的是这张专辑该碟的真实曲目数，与入队几首无关
+    const album = bundle(2, COVER, { 1: 2, 2: 2 })
+    const perDisc = (disc: number, tag: string): TrackDTO[] => [
+      { id: `a${disc}1`, name: `${tag}1`, artist: 'S', album: 'A', cover: '', trackNo: 1, disc },
+      { id: `a${disc}2`, name: `${tag}2`, artist: 'S', album: 'A', cover: '', trackNo: 2, disc },
+    ]
+    env.app.enqueue({ tracks: [...perDisc(1, 'd1t'), ...perDisc(2, 'd2t')], quality: '320', source: 'qq', album })
+    const root = path.join(env.dl, ROOT)
+    await waitFor(() => env.events.done >= 4)
+    await waitFor(() =>
+      fs.existsSync(path.join(root, 'CD01', 'album.cue')) && fs.existsSync(path.join(root, 'CD02', 'album.cue')),
+    )
+    expect(env.events.failed).toBe(0)
+    // cue 不在专辑根：目录才是碟号的载体，两碟同名文件（'01 …'）只在各自的 CDnn 里才指得开
+    expect(fs.readdirSync(root).sort()).toEqual(['CD01', 'CD02', 'cover.jpg'])
+    for (const [seg, tag, other] of [['CD01', 'd1t', 'd2t'], ['CD02', 'd2t', 'd1t']] as const) {
+      const dir = path.join(root, seg)
+      expect(fs.readdirSync(dir).sort()).toEqual([`01 ${tag}1.mp3`, `02 ${tag}2.mp3`, 'album.cue'])
+      const text = fs.readFileSync(path.join(dir, 'album.cue'), 'utf-8')
+      // cueFiles 逐个回本目录 existsSync：归错碟写出的 cue 在这里露出来（文件在隔壁目录）
+      expect(cueFiles(text, dir)).toEqual([`01 ${tag}1.mp3:MP3`, `02 ${tag}2.mp3:MP3`])
+      expect(text).not.toContain(other)
+    }
   })
 
   it('一首失败 → 只有 cover 没有 cue；retryFailed 成功后补生成且含该曲', async () => {
