@@ -232,6 +232,40 @@ describe('AlbumPackager 完成度', () => {
     expect(p.record(B2, done(1, '01 a(1).flac', 'a'))).toEqual([1])
   })
 
+  // 期望/完成表的键若是 trackNo 本身，下面两条就是整条封装功能的哑火路径：2CD 发行按碟从 1 重新编号
+  // 是通行做法（网易云 songs[].no 正是这个语义，spec §9 R1 从未拿真实多碟样本验过），两碟的第 1 首
+  // 抢同一个槽，后入账那笔把前一笔记的顶掉 → 两碟都永远配不齐 → 一张 cue 都不写。
+  it('每碟重新编号（两碟都有第 1 首）→ 两碟各自判齐、各出本碟的 cue', () => {
+    // 失败模式是「缺 cue」而不是「错 cue」，所以它不会以红任务的形式暴露，只会让多碟专辑
+    // 安静地没有封装产物——恰恰是最需要 cue 的那批专辑。
+    const BR: AlbumBundle = { ...B, totalTracks: 2, discs: [1, 2], discTotals: { 1: 1, 2: 1 } }
+    const p = new AlbumPackager()
+    p.plan(BR, [{ trackNo: 1, disc: 1 }, { trackNo: 1, disc: 2 }])
+    expect(p.record(BR, done(1, 'CD01/01 a.flac', 'a'))).toEqual([1])
+    expect(p.record(BR, done(1, 'CD02/01 b.flac', 'b'))).toEqual([2])
+    // 各碟只收自己那一笔：CD01 的 cue 引用 CD02 的文件，播放器就在 CD01 目录里找一个不存在的东西
+    expect(p.cueEntries(BR, 1).map((e) => e.fileName)).toEqual(['01 a.flac'])
+    expect(p.cueEntries(BR, 2).map((e) => e.fileName)).toEqual(['01 b.flac'])
+    expect(cue(BR, p.cueEntries(BR, 1))).toContain('FILE "01 a.flac" FLAC')
+    expect(cue(BR, p.cueEntries(BR, 2))).toContain('FILE "01 b.flac" FLAC')
+  })
+
+  it('每碟重新编号时按落盘目录归碟：CD02 那首先完成也不会填进 CD01 的空槽，重试也只覆写自己那一碟', () => {
+    // 曲序相同、碟号不同的两笔账光看 trackNo 分不出归属，而 cue 写在音频所在目录（app.ts 用
+    // albumTrackDir(...disc) 拼），所以「这一笔属于哪一碟」的事实依据是路径里的 CDnn 段。
+    // 归错碟的后果不是缺 cue 而是错 cue：CD01 的 FILE 写着只存在于 CD02 的文件名，加载即报错。
+    const BR: AlbumBundle = { ...B, totalTracks: 2, discs: [1, 2], discTotals: { 1: 1, 2: 1 } }
+    const p = new AlbumPackager()
+    p.plan(BR, [{ trackNo: 1, disc: 1 }, { trackNo: 1, disc: 2 }])
+    expect(p.record(BR, done(1, 'CD02/01 b.flac', 'b'))).toEqual([2])
+    expect(p.cueEntries(BR, 1)).toEqual([])   // CD01 那一槽仍是空的
+    expect(p.record(BR, done(1, 'CD01/01 a.flac', 'a'))).toEqual([1])
+    // CD02 那首被重试覆写：CD01 的账原样留着，两边各自重写自己的 cue
+    expect(p.record(BR, done(1, 'CD02/01 b(1).flac', 'b'))).toEqual([2])
+    expect(p.cueEntries(BR, 1).map((e) => e.fileName)).toEqual(['01 a.flac'])
+    expect(p.cueEntries(BR, 2).map((e) => e.fileName)).toEqual(['01 b(1).flac'])
+  })
+
   it('已齐碟里的曲被重试覆写 → 该碟再报一次，cue 跟着新落盘名重写', () => {
     const p = new AlbumPackager()
     p.plan(B1, [{ trackNo: 1, disc: 1 }, { trackNo: 2, disc: 1 }])

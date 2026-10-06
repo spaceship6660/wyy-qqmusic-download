@@ -56,6 +56,28 @@ export function albumKey(b: AlbumBundle): string {
   return `${b.source}:${b.id}`
 }
 
+type DoneRec = { fileName: string; ext: string; title: string }
+
+/** 期望表的一条：这一槽属于哪一碟、第几首。槽位键由 slotKey 算，这里存着是为了 record/cueEntries
+ *  不必再从键字符串里把数字拆回来——拆一次拼一次就是两处口径。 */
+type ExpectRec = { slot: string; disc: number; trackNo: number }
+
+/** 槽位键：碟号 + 曲序。
+ *  只按 trackNo 记 key 时，2CD 发行「每碟从 1 重新编号」（通行做法；网易云 `songs[].no` 就是这个
+ *  语义，spec §9 R1 那条「未经真实多碟样本验证」的风险）会让两碟的第 1 首抢同一个槽——后入账那笔
+ *  把前一笔记的顶掉，两碟都永远配不齐、一张 cue 都不写。按 (disc, trackNo) 记在「每碟重编」与
+ *  「全专辑连编」两种口径下都正确，所以对连编专辑也没有副作用。 */
+const slotKey = (disc: number, trackNo: number): string => `${disc}:${trackNo}`
+
+/** 从落盘路径读回碟号：多碟时曲目目录是 albumBundle.discSegments 给的 `CD01`/`CD02`…，
+ *  而 cue 就写在同一个目录里（app.ts 的 albumTrackDir），所以这一层目录名是「这一笔记给哪一碟」的
+ *  现场事实，比按曲序猜可靠。认不出（单碟没有 CDnn 层、平铺、测试里给裸文件名）回 NaN 走回退判据。
+ *  专辑目录名形如「歌手 - 专辑 (年)」，永远带 ' - '，不会被误认成 CDnn。 */
+const discFromPath = (p: string): number => {
+  const seg = path.basename(path.dirname(p))
+  return /^CD\d+$/.test(seg) ? Number(seg.slice(2)) : NaN
+}
+
 /** 一笔完成记录：outputPath 必须是**实际落盘全路径**（含 uniquePath 加过的 (1) 后缀），
  *  ext 必须是**落盘**扩展名（降级换档后它与请求档位不同），
  *  title 必须是**原曲名**——文件名经 safeName 会换掉 / : * 等字符并截断，反推会失真。 */
@@ -66,29 +88,31 @@ export interface AlbumCompletion {
   title: string
 }
 
-type DoneRec = { fileName: string; ext: string; title: string }
-
 /** 整张专辑的批次完成度：plan() 登记期望，record() 记账，某碟下齐才允许出该碟 cue。
+ *  两张表都按 (disc, trackNo) 记槽位，见 slotKey。
  *  session 内有效（与 app.ts 的 jobSpecs 同生命周期）；重启后需重新整张入队。
  *  「下齐」的**数量**判据来自 bundle.discTotals（专辑真实曲目数），不是入队曲目数——见 AlbumBundle 的字段注释。 */
 export class AlbumPackager {
-  private expected = new Map<string, Map<number, number>>()  // key → (trackNo → disc)
-  private done = new Map<string, Map<number, DoneRec>>()
+  private expected = new Map<string, Map<string, ExpectRec>>()  // key → (碟号:曲序 → 该槽)
+  private done = new Map<string, Map<string, DoneRec>>()
 
   /** 登记「这批曲目属于这张专辑的哪一碟」。trackNo 缺失按下标+1：期望表按入队顺序就是整批，
    *  而 record 那边缺 trackNo 只能按 1 —— 两处口径不一致时该碟永远配不齐、只出不了 cue，
    *  这比把两首都算成「第 1 首」、出一张缺了第 2 段的 cue 安全。
-   *  入队列表在这里只贡献 trackNo → 碟号 的对应关系（解析层才知道的分配信息），
+   *  入队列表在这里只贡献 (disc, trackNo) → 槽位 的对应关系（解析层才知道的分配信息），
    *  **该碟该有几首**由 b.discTotals 决定：专辑页懒加载、入队往往只是子集，按子集判齐就是
    *  给一张 10 首的专辑写 2 FILE 的 cue。同一个批次多次 plan（先下 2 首、滚完再下 8 首）合并进
    *  同一张期望表——这是「残缺批次之后补齐」这条恢复路径成立的前提。 */
   plan(b: AlbumBundle, tracks: Array<{ trackNo?: number; disc?: number }>): void {
     const k = albumKey(b)
-    const exp = this.expected.get(k) ?? new Map<number, number>()
+    const exp = this.expected.get(k) ?? new Map<string, ExpectRec>()
     tracks.forEach((t, i) => {
       // disc 回落 discs[0]（与 runDownloadJob 的落盘目录同一个算式）：两处不一致时
       // cue 会写到音频不在的那个目录。
-      exp.set(t.trackNo ?? i + 1, t.disc ?? b.discs[0] ?? 1)
+      const disc = t.disc ?? b.discs[0] ?? 1
+      const trackNo = t.trackNo ?? i + 1
+      const rec: ExpectRec = { slot: slotKey(disc, trackNo), disc, trackNo }
+      exp.set(rec.slot, rec)
     })
     this.expected.set(k, exp)
     if (!this.done.has(k)) this.done.set(k, new Map())
@@ -103,14 +127,36 @@ export class AlbumPackager {
   record(b: AlbumBundle, c: AlbumCompletion): number[] {
     if (!c.outputPath) return []
     const k = albumKey(b)
-    const d = this.done.get(k) ?? new Map<number, DoneRec>()
-    d.set(c.trackNo, { fileName: path.basename(c.outputPath), ext: c.ext, title: c.title })
-    this.done.set(k, d)
     const exp = this.expected.get(k)
-    // 没登记过这首（plan 之外的批次）→ 谈不上「这次把它配齐了」
-    const disc = exp?.get(c.trackNo)
-    if (exp === undefined || disc === undefined) return []
-    return this.discFull(b, exp, d, disc) ? [disc] : []
+    const d = this.done.get(k) ?? new Map<string, DoneRec>()
+    const slot = this.slotFor(exp, d, c)
+    // 没登记过这首（plan 之外的批次）→ 没有碟号可归，也谈不上「这次把它配齐了」
+    if (!exp || !slot) return []
+    d.set(slot.slot, { fileName: path.basename(c.outputPath), ext: c.ext, title: c.title })
+    this.done.set(k, d)
+    return this.discFull(b, exp, d, slot.disc) ? [slot.disc] : []
+  }
+
+  /** 这一笔该记到哪一槽。候选是期望表里曲序相同的那些碟；多碟重编号时曲序分不出归属，按序取：
+   *  ① 落盘目录里的 CDnn 段能对上某个候选就采信它 —— cue 写在音频所在目录，归错碟写出的就是
+   *    「FILE 指着隔壁目录里那个文件」的**错** cue，比缺 cue 更糟（播放器加载即报错）。
+   *  ② 路径读不出碟号时（裸文件名等）填该曲序**还没占用**的那一碟、按碟号升序：重编号专辑
+   *    按碟号顺序入账时这就是正确归属。
+   *  ③ 都占用了就覆写碟号最小的那一槽（重试语义：同一曲序覆写同一槽，不新增槽位）。
+   *  曲序只有一个候选（单碟、或全专辑连编）时走不到 ②③，行为与改键之前逐字一致。 */
+  private slotFor(
+    exp: Map<string, ExpectRec> | undefined,
+    d: Map<string, DoneRec>,
+    c: AlbumCompletion,
+  ): ExpectRec | undefined {
+    if (!exp) return undefined
+    const cand: ExpectRec[] = []
+    for (const r of exp.values()) if (r.trackNo === c.trackNo) cand.push(r)
+    if (cand.length === 0) return undefined
+    if (cand.length === 1) return cand[0]
+    cand.sort((x, y) => x.disc - y.disc)
+    const hint = discFromPath(c.outputPath)
+    return cand.find((r) => r.disc === hint) ?? cand.find((r) => !d.has(r.slot)) ?? cand[0]
   }
 
   /** 该碟的 cue 条目；碟内任一曲未落盘、落盘数没到 discTotals 声明的真实数、
@@ -124,13 +170,13 @@ export class AlbumPackager {
     if (!exp || !d) return []
     if (!this.discFull(b, exp, d, disc)) return []
     const out: CueEntry[] = []
-    for (const [no, dd] of exp) {
-      if (dd !== disc) continue
-      const rec = d.get(no)
+    for (const [slot, r] of exp) {
+      if (r.disc !== disc) continue
+      const rec = d.get(slot)
       if (!rec) return []   // discFull 已保证走不到这里；留着是让「槽位不在账上」两种判据永远同源
       const container = rec.ext.toUpperCase()
       if (!CUE_CONTAINERS.has(container)) return []
-      out.push({ trackNo: no, title: rec.title, fileName: rec.fileName, container })
+      out.push({ trackNo: r.trackNo, title: rec.title, fileName: rec.fileName, container })
     }
     return out.sort((x, y) => x.trackNo - y.trackNo)
   }
@@ -142,14 +188,14 @@ export class AlbumPackager {
    *  disc 不在 discTotals 里（入队了一首不属于这张专辑这一碟的曲）→ 永不判齐：不抛、不写 cue，
    *  音频照下。真实数据走不到这条（bundle 与 tracks 出自同一次解析），走到就说明两处对不上，
    *  此时出 cue 等于凭猜测决定这张专辑有几首——宁缺不错。 */
-  private discFull(b: AlbumBundle, exp: Map<number, number>, d: Map<number, DoneRec>, disc: number): boolean {
+  private discFull(b: AlbumBundle, exp: Map<string, ExpectRec>, d: Map<string, DoneRec>, disc: number): boolean {
     const required = b.discTotals?.[disc]
     if (typeof required !== 'number') return false
     let inDisc = 0
-    for (const [no, dd] of exp) {
-      if (dd !== disc) continue
+    for (const [slot, r] of exp) {
+      if (r.disc !== disc) continue
       inDisc++
-      if (!d.has(no)) return false
+      if (!d.has(slot)) return false
     }
     return inDisc > 0 && inDisc >= required
   }
