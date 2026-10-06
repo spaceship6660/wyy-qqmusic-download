@@ -14,6 +14,7 @@ export interface DownloadJob {
   error?: string
   outputPath?: string
   downgraded?: boolean      // 请求无损但实际降级（渲染器展示黄条）
+  finalQuality?: Quality    // 实际落档（降级提示回显用）；缺省=未走完直链解析
   anonFallback?: boolean    // 账户直链被拒（CDN 403）后改走匿名成功的标记（渲染器展示灰条）
   cancelRequested?: boolean // 取消标记（可序列化；AbortController 本体不放 job 上，防 IPC 结构化克隆炸）
 }

@@ -10,6 +10,8 @@ export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
 export interface UiQueueJob {
   id: string; source: string; state: string; progress: number
   name: string; artist: string; error?: string; downgraded?: boolean; anonFallback?: boolean; outputPath?: string
+  /** 主进程实际落档（降级文案回显）；string 而非 UiQuality——IPC 快照不经类型检查 */
+  finalQuality?: string
 }
 
 export const useDownloadStore = defineStore('download', {
@@ -61,6 +63,7 @@ export const useDownloadStore = defineStore('download', {
         progress: job.progress ?? 0,
         name: job.track?.name ?? '', artist: job.track?.artist ?? '',
         error: job.error, downgraded: job.downgraded, anonFallback: job.anonFallback, outputPath: job.outputPath,
+        finalQuality: job.finalQuality,
       }
       if (idx < 0) {
         this.queue.push(entry)

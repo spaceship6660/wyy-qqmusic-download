@@ -125,6 +125,7 @@ export function createApp(deps: AppDeps) {
     // 1) 直链（约 20 分钟过期；下载失败重取一次）
     const first = await spec.resolveOnce(job.quality, available)
     if (first.downgraded) job.downgraded = true
+    job.finalQuality = first.quality
     // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
     //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
     const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
@@ -167,6 +168,7 @@ export function createApp(deps: AppDeps) {
       // 已失去 wx 保护，并发同名任务可能用 uniquePath 抢走同名（check-then-write）
       const fresh = await spec.resolveOnce(job.quality, available)
       if (fresh.downgraded) job.downgraded = true
+      job.finalQuality = fresh.quality
       ext = spec.extFor(fresh.quality)
       dest = reserveDest(ext)
       lrcPath = dest.slice(0, -(ext.length + 1)) + '.lrc'

@@ -29,3 +29,11 @@ export function qualitiesFor(source: QualitySource): Array<{ v: Quality; label: 
 export function isQualityFor(source: QualitySource, q: Quality): boolean {
   return qualitiesFor(source).some((x) => x.v === q)
 }
+
+/** 档位 → 中文名（词表就是 QQ_QUALITIES 这张五档超集，不再另立第二份字面量）。
+ *  WHY 容错而不是抛错/返回 undefined：入档来自 IPC 快照（无类型保证），且未走完直链解析时
+ *  finalQuality 缺省。未知值回落「低品质」= 0.7.0 之前的整句文案，即退化成旧行为，
+ *  绝不把内部枚举名或 "undefined" 甩到用户脸上。 */
+export function labelForQuality(q?: string): string {
+  return QQ_QUALITIES.find((x) => x.v === q)?.label ?? '低品质'
+}

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDownloadStore } from '../src/renderer/src/stores/download'
-import { isQualityFor, qualitiesFor } from '../src/renderer/src/qualityOptions'
+import { isQualityFor, labelForQuality, qualitiesFor } from '../src/renderer/src/qualityOptions'
 
 describe('download store', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -120,5 +120,38 @@ describe('码率档位按源过滤（DownloadOptions 的规则层，纯函数）
     expect(s.quality).toBe('flac')
     expect(qualitiesFor('netease').some((x) => x.v === s.quality)).toBe(true)
     expect(isQualityFor('netease', s.quality)).toBe(true)
+  })
+})
+
+describe('labelForQuality（降级提示回显实际落档）', () => {
+  // WHY 落在 renderer-store.test.ts：档位中文名的唯一事实源是 qualityOptions 的 QQ_QUALITIES（五档超集），
+  // 主进程没有消费方（QQ 侧报错走 describeTierSizes，回答的是「该曲登记了哪些档」，另一个问题），
+  // 所以不再另立 qualityLabel/QUALITY_CN，避免第四份会漂移的词表。
+  it('五档全解析（与选择器同一张表，不是第二份字面量）', () => {
+    expect(labelForQuality('flac')).toBe('无损')
+    expect(labelForQuality('ape')).toBe('APE')
+    expect(labelForQuality('320')).toBe('320k')
+    expect(labelForQuality('128')).toBe('128k')
+    expect(labelForQuality('m4a')).toBe('m4a')
+  })
+
+  it('缺档名/未识别值回落「低品质」：绝不渲染出 undefined', () => {
+    // 回落选「低品质」而不是原样回显：那是 0.7.0 之前的整句文案，未知档位下退化成旧行为即可，
+    // 不能把内部枚举名（或 IPC 传丢的 undefined）直接甩给用户。
+    expect(labelForQuality(undefined)).toBe('低品质')
+    expect(labelForQuality('')).toBe('低品质')
+    expect(labelForQuality('rs350')).toBe('低品质')
+    // 模板拼接的等价断言：整句里不出现 "undefined"
+    expect(`已降级为 ${labelForQuality(undefined)}`).toBe('已降级为 低品质')
+  })
+
+  it('队列事件把 finalQuality 透传到 UI 快照（降级行才有内容可回显）', () => {
+    const s = useDownloadStore()
+    s.onQueueEvent({ id: 'd1', source: 'qq', state: 'done', progress: 100, downgraded: true, finalQuality: '320', track: { name: 'D' } } as any)
+    expect(s.queue[0].downgraded).toBe(true)
+    expect(labelForQuality(s.queue[0].finalQuality)).toBe('320k')
+    // 未走完直链解析（如 queued 快照）时 finalQuality 缺省，不报错
+    s.onQueueEvent({ id: 'd2', source: 'qq', state: 'queued', progress: 0 } as any)
+    expect(s.queue[1].finalQuality).toBeUndefined()
   })
 })
