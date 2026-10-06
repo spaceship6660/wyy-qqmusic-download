@@ -829,6 +829,32 @@ describe('ne 会话探测单点缓存', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
+  // catch 分支的自相矛盾（2026-10-07 评审）：权威探测判为失效后，跨过 60s 窗口再遇到探测失败
+  // （断网/风控）时，旧实现回 loggedIn:true + sessionExpired:true——侧栏读 sessionExpired 报
+  // 「登录已失效」、网易云页头读 loggedIn 报「已登录：」+空昵称，同一屏两个相反的结论。
+  it('已判失效后探测失败：loggedIn 必须跟着 sessionExpired 落 false，不得并存', async () => {
+    vi.useFakeTimers() // 只为了跨过缓存窗口：窗口内第二次调用命中上次的 null 结论，走不到 catch 分支
+    const dir = neDirWithCookie()
+    try {
+      let impl = async (): Promise<Response> => new Response(JSON.stringify({ code: 200, profile: {} })) // 服务端确认不认
+      const f = vi.fn(async () => impl()) as unknown as typeof fetch
+      const app = createApp({ userDataDir: dir, fetchImpl: f })
+      expect(await app.neAuthStatus()).toEqual({ loggedIn: false, sessionExpired: true })
+      let probedAgain = false
+      impl = async () => { probedAgain = true; throw new Error('fetch failed') } // 换成真抛（断网）
+      vi.advanceTimersByTime(61_000)
+      const pending = app.neAuthStatus()
+      await vi.advanceTimersByTimeAsync(3_000) // 放掉 getJson 的 1s/2s 退避，用例不白等
+      expect(await pending).toEqual({ loggedIn: false, sessionExpired: true })
+      // 红线：确实离开了缓存真重探并落到 catch——否则上面那条断言是靠缓存命中蒙对的。
+      // 用标记而非调用次数：失败重试会再打 2 次，次数随重试策略浮动。
+      expect(probedAgain).toBe(true)
+    } finally {
+      vi.useRealTimers()
+      fs.rmSync(dir, { recursive: true, force: true }) // 邻近用例在末尾才 rm，断言失败会漏临时目录
+    }
+  })
+
   it('neAuthSaveFromWindow 失效缓存：扫码登录后必须真重探', async () => {
     const dir = neDirWithCookie()
     const f = vi.fn(async () => acctRes(777)) as unknown as typeof fetch

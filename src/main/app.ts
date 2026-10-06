@@ -627,8 +627,10 @@ export function createApp(deps: AppDeps) {
       try {
         acc = await neAccountProbe()
       } catch {
-        // 探测本身失败：无法判定，保留文件判据且不标记失效（不写缓存 → 下次调用真重探）
-        return { loggedIn: true, sessionExpired: neSessionExpired }
+        // 探测本身失败：无法判定时不新增「失效」结论（不写缓存 → 下次调用真重探）。
+        // 但此前已有权威探测判为失效时，loggedIn 必须跟着 false——否则同一份返回里
+        // loggedIn:true 与 sessionExpired:true 并存，侧栏与网易云页头各读一半会当场打架。
+        return { loggedIn: !neSessionExpired, sessionExpired: neSessionExpired }
       }
       if (neLoggedInFromAccount(acc)) {
         neSessionExpired = false
