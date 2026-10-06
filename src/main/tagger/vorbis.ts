@@ -95,6 +95,16 @@ export async function tagFlac(path: string, meta: TagMeta): Promise<void> {
   if (meta.date) fields.DATE = meta.date
   if (meta.copyright) fields.COPYRIGHT = meta.copyright
   if (meta.genre) fields.GENRE = meta.genre
+  // 专辑封装用。键名取 Vorbis 推荐表里现行的那组（TRACKTOTAL/DISCTOTAL，music-metadata 也按这两个键
+  // 映射 totaltracks/totaldiscs）。总数缺省就不写 TOTAL 键——空串键会被播放器渲染成 "3/"。
+  if (meta.track !== undefined) {
+    fields.TRACKNUMBER = String(meta.track)
+    if (meta.trackTotal !== undefined) fields.TRACKTOTAL = String(meta.trackTotal)
+  }
+  if (meta.disc !== undefined) {
+    fields.DISCNUMBER = String(meta.disc)
+    if (meta.discTotal !== undefined) fields.DISCTOTAL = String(meta.discTotal)
+  }
   if (meta.lyrics) {
     fields.LYRICS = meta.lyrics
     fields.UNSYNCEDLYRICS = meta.lyrics

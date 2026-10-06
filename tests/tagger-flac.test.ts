@@ -98,3 +98,94 @@ describe('tagFlac', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
+
+// 0.7.0 专辑封装：整张下载才传 track/disc。tagFlac 会重建整条元数据块链，
+// 所以「加了四个键之后封面与歌词双键还在」必须一起验，不能只验 track。
+describe('tagFlac track/disc（TRACKNUMBER / TRACKTOTAL / DISCNUMBER / DISCTOTAL）', () => {
+  const flat: Parameters<typeof tagFlac>[1] = {
+    title: 'T', artist: 'A', album: 'AL', date: '', copyright: '', genre: '', lyrics: '', cover: undefined,
+  }
+
+  const onFixture = async (meta: Parameters<typeof tagFlac>[1], check: (file: string) => Promise<void>): Promise<void> => {
+    const src = fs.readFileSync(path.join(__dirname, 'fixtures', 'mini.flac'))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flac-track-'))
+    const dest = path.join(dir, 'out.flac')
+    fs.writeFileSync(dest, src)
+    try {
+      await tagFlac(dest, meta)
+      await check(dest)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('封面 + 歌词 + track/disc 同时写入：三者都读得回来', async () => {
+    await onFixture({
+      ...flat,
+      title: '告别曲', date: '2019-05-20', genre: '流行',
+      lyrics: '第一行歌词', cover: Buffer.from('FAKEIMG', 'utf-8'), coverMime: 'image/png',
+      track: 3, trackTotal: 13, disc: 2, discTotal: 2,
+    }, async (dest) => {
+      const raw = await readVorbisRaw(dest)
+      expect(raw.TRACKNUMBER).toBe('3')
+      expect(raw.TRACKTOTAL).toBe('13')
+      expect(raw.DISCNUMBER).toBe('2')
+      expect(raw.DISCTOTAL).toBe('2')
+      // 原有的歌词双键与既有键不受影响（键表是整表重建的，漏一个就是静默丢数据）
+      expect(raw.LYRICS).toBe('第一行歌词')
+      expect(raw.UNSYNCEDLYRICS).toBe('第一行歌词')
+      expect(raw.TITLE).toBe('告别曲')
+      expect(raw.DATE).toBe('2019-05-20')
+      // PICTURE 块仍在，且 music-metadata 能按 track/disk 语义解析这四个键
+      expect(await readBlockData(dest, 6)).toBeDefined()
+      const md = await parseFile(dest)
+      expect(md.common.track?.no).toBe(3)
+      expect(md.common.track?.of).toBe(13)
+      expect(md.common.disk?.no).toBe(2)
+      expect(md.common.disk?.of).toBe(2)
+      expect(md.common.picture?.length).toBe(1)
+      expect(Buffer.from((md.common.picture![0] as any).data).toString('utf-8')).toBe('FAKEIMG')
+    })
+  })
+
+  it('总数缺省 → 只写 TRACKNUMBER/DISCNUMBER，不写空的 TOTAL 键', async () => {
+    await onFixture({ ...flat, track: 7, disc: 1 }, async (dest) => {
+      const raw = await readVorbisRaw(dest)
+      expect(raw.TRACKNUMBER).toBe('7')
+      expect(raw.DISCNUMBER).toBe('1')
+      expect(raw.TRACKTOTAL).toBeUndefined()
+      expect(raw.DISCTOTAL).toBeUndefined()
+      const md = await parseFile(dest)
+      expect(md.common.track?.no).toBe(7)
+      expect(md.common.track?.of).toBeNull()
+    })
+  })
+
+  it('反锚：不传 track/disc 时这四个键一个都不写（平铺下载逐字节不变）', async () => {
+    await onFixture(flat, async (dest) => {
+      const raw = await readVorbisRaw(dest)
+      expect(raw.TRACKNUMBER).toBeUndefined()
+      expect(raw.TRACKTOTAL).toBeUndefined()
+      expect(raw.DISCNUMBER).toBeUndefined()
+      expect(raw.DISCTOTAL).toBeUndefined()
+      // 整表重建 → 键集合就是写入器该有的那三个（flat 的 date/copyright/genre/lyrics 都是空串，本来就不写），
+      // 多出任何 TRACK*/DISC* 前缀键都是回归
+      expect(Object.keys(raw).sort()).toEqual(['ALBUM', 'ARTIST', 'TITLE'])
+    })
+  })
+
+  it('反锚：只给 disc 不凭空造 TRACKNUMBER，只给 track 不凭空造 DISCNUMBER', async () => {
+    await onFixture({ ...flat, disc: 2, discTotal: 3 }, async (dest) => {
+      const raw = await readVorbisRaw(dest)
+      expect(raw.DISCNUMBER).toBe('2')
+      expect(raw.DISCTOTAL).toBe('3')
+      expect(raw.TRACKNUMBER).toBeUndefined()
+      expect(raw.TRACKTOTAL).toBeUndefined()
+    })
+    await onFixture({ ...flat, track: 5 }, async (dest) => {
+      const raw = await readVorbisRaw(dest)
+      expect(raw.TRACKNUMBER).toBe('5')
+      expect(raw.DISCNUMBER).toBeUndefined()
+    })
+  })
+})
