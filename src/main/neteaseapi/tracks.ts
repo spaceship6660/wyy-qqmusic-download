@@ -84,10 +84,11 @@ export async function neGetTrackDetail(client: NeClient, id: number): Promise<Ne
 }
 
 export type NeAccount = { uid: number; nickname: string } | null
-/** 会话有效性权威探测。
- *  与 neAccount 的唯一区别：**传输/风控异常上抛**，只有「服务端确实不认这份凭证」才返回 null。
- *  旧实现把异常一并 catch 成 null，调用方就无法区分「cookie 过期」与「断网/被频控」——
- *  于是网络抖动会被显示成「登录已失效」，把用户赶去重新扫码（2026-10-06 审计发现）。
+/** 会话有效性权威探测（本模块唯一的 account 出口，没有「吞异常返回 null」的版本）。
+ *  传输/风控异常**上抛**，只有「服务端确实不认这份凭证」才返回 null：
+ *  一旦把异常一并 catch 成 null，调用方就无法区分「cookie 过期」与「断网/被频控」，
+ *  网络抖动会被显示成「登录已失效」，把用户赶去重新扫码（2026-10-06 审计发现；
+ *  2026-10-07 删掉当时并存的那个吞异常壳——它已无生产调用方，留着只会把新调用点带回同一个误报）。
  *  判据：/api/nuser/account/get 三种情形都回 code=200，只有 profile.userId 有无能区分凭证有效性。 */
 export async function neAccountChecked(client: NeClient): Promise<NeAccount | null> {
   const json = await client.getJson<{ profile?: { userId?: number; nickname?: string } }>(
@@ -96,15 +97,6 @@ export async function neAccountChecked(client: NeClient): Promise<NeAccount | nu
   const p = json?.profile
   if (p?.userId) return { uid: p.userId, nickname: p.nickname ?? '' }
   return null
-}
-
-/** 兼容壳：调用方只想要数据、不关心「为什么拿不到」时用它（异常吞成 null）。 */
-export async function neAccount(client: NeClient): Promise<NeAccount | null> {
-  try {
-    return await neAccountChecked(client)
-  } catch {
-    return null
-  }
 }
 
 // --- 2026-09-06 新增：专辑搜索/详情 + 歌单全量分页 ---

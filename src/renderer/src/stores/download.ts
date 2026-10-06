@@ -1,10 +1,14 @@
 import { defineStore } from 'pinia'
+// 档位并集不再在渲染侧另写一份字面量：UI 侧只留 qualityOptions 一处声明，这里取别名。
+// 与主进程 Quality 的同集关系由 tests/renderer-store.test.ts 的类型断言把守（那边同时导入两侧，
+// 走 tsc -p tsconfig.json；渲染侧 tsconfig.web 不含 node 类型，直接 import 主进程模块会 TS2591）。
+import type { Quality } from '../qualityOptions'
 
 export interface UiTrack {
   id: string; name: string; artist: string; album: string; cover: string
   mediaMid?: string; duration?: number; vip?: boolean
 }
-export type UiQuality = 'flac' | 'ape' | '320' | '128' | 'm4a'
+export type UiQuality = Quality
 export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
 
 export interface UiQueueJob {

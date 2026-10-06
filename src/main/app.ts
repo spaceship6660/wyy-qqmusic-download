@@ -9,6 +9,7 @@ import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
 import type { NeClient } from './neteaseapi/client'
 import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccountChecked, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
+import type { NeAccount } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
 import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
@@ -68,9 +69,22 @@ export function createApp(deps: AppDeps) {
   // 判定走权威接口 /api/nuser/account/get（profile.userId 有无）。
   // 仅当「文件存在且服务端确认无效」才算会话失效；网络抖动导致的探测失败不算（保守，避免误报未登录）。
   let neSessionExpired = false
-  // neAuthStatus 结果缓存（60s）：与 neteaseapi/tracks.ts 的 TRACK_IDS_TTL_MS 同款窗口
+  // 会话探测结果缓存（60s）：与 neteaseapi/tracks.ts 的 TRACK_IDS_TTL_MS 同款窗口。
+  // 缓存的是 account 探测的**结论本身**（NeAccount|null），neAuthStatus（侧栏判据）与 neAccount
+  // （昵称/uid）两个消费方都读它。各探各的会一个窗口打两次 /api/nuser/account/get，
+  // 而且只有一路写缓存 → 两条判据取自不同时刻，同一屏能给出相反结论
+  // （2026-10-07 评审：侧栏「登录已失效」而网易云页头「已登录」+空昵称）。
+  // 只缓存服务端给的确切结论：探测失败不写缓存（下次调用真重探），也不置 neSessionExpired。
   const NE_STATUS_TTL_MS = 60_000
-  let neStatusCache: { at: number; value: { loggedIn: boolean; sessionExpired?: boolean } } | null = null
+  let neAccountCache: { at: number; value: NeAccount } | null = null
+
+  /** 单点会话探测：窗口内复用同一结论，窗口外（或登录态变化清缓存后）真重探。异常照旧上抛。 */
+  async function neAccountProbe(): Promise<NeAccount> {
+    if (neAccountCache && Date.now() - neAccountCache.at < NE_STATUS_TTL_MS) return neAccountCache.value
+    const acc = await neAccountChecked(neClient)
+    neAccountCache = { at: Date.now(), value: acc }
+    return acc
+  }
   let settings = loadSettings(settingsFile)
 
   const emitEvent = deps.emitEvent ?? (() => {})
@@ -170,7 +184,10 @@ export function createApp(deps: AppDeps) {
       // catch-all 重取直链重下；无论档位是否变化都重新占位——rmSync 后 dest 在 await 期间
       // 已失去 wx 保护，并发同名任务可能用 uniquePath 抢走同名（check-then-write）
       const fresh = await spec.resolveOnce(job.quality, available)
-      if (fresh.downgraded) job.downgraded = true
+      // 覆写而非 OR：留下文件的是这一次解析，降级标记必须与它同源。
+      // 旧写法 sticky-OR（if (fresh.downgraded) job.downgraded = true）配上 finalQuality 的覆写会自相矛盾：
+      // 首解回 320k（downgraded=true）、重取回无损（downgraded=false/flac）时，徽标显示「已降级为 无损」。
+      job.downgraded = fresh.downgraded
       job.finalQuality = fresh.quality
       ext = spec.extFor(fresh.quality)
       dest = reserveDest(ext)
@@ -579,63 +596,56 @@ export function createApp(deps: AppDeps) {
     neAlbumSongs: (id: number) => neAlbumSongs(neClient, id),
     nePlaylistPage: (params: { id: string; offset: number; limit?: number }) =>
       nePlaylistPage(neClient, params.id, params.offset ?? 0, params.limit ?? 200),
-    /** ne:account 是渲染侧的会话判据来源（App.vue 据此写「登录已失效」），必须用权威探测：
-     *  断网/风控要上抛，让调用方走 catch；用 neAccount 壳会把它们塌缩成 null→误报失效（2026-10-07）。
-     *  只要数据、不关心失败原因的调用方仍用 neAccount 壳。 */
-    neAccount: () => neAccountChecked(neClient),
+    /** ne:account 与 neAuthStatus 读同一份 neAccountProbe 结论：一个窗口一次探测、一个结论，
+     *  两侧判据不可能再取自不同时刻。异常照旧上抛（三态判据见 neSessionExpired 声明处）。 */
+    neAccount: () => neAccountProbe(),
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),
     neAuthImport: (header: string) => {
-      neStatusCache = null
+      neAccountCache = null
       const ok = neAuth.importCookie(header)
       if (ok) {
         neClient.setCookie(header)
         clearNeteaseTrackIdsCache()
+        // 与 neAuthClear / neAuthSaveFromWindow 一致地清失效标记：导入了新凭证却留着上一次的
+        // 「登录已失效」，断网期间不重探就一直显示失效（2026-10-07 评审）。
+        neSessionExpired = false
       }
       return ok
     },
-    /** 登录态：文件存在 + 服务端确认有效才算「已登录」。
-     *  三态严格分开（2026-10-06 审计修复）：
-     *    服务端回带 profile.userId → 已登录；
-     *    服务端确认不认（profile 空）→ 未登录 + sessionExpired；
-     *    请求本身失败（断网/风控空响应）→ 判不了，保守沿用文件判据，**不置 sessionExpired**。
-     *  旧实现走 neAccount（异常也吞成 null），第三种情形塌进第二种，断网即误报「登录已失效」。
-     *  结果缓存 60s：App.vue 与 NeteaseTab.vue 挂载时各调一次、之后每次进网易云页再调，
-     *  不缓存会白打网络并挤占网易云频控预算（README「限速范围」条）。 */
+    /** 登录态：文件存在 + 服务端确认有效才算「已登录」，三态判据见上方 neSessionExpired 声明处。
+     *  60s 结果缓存 + 与 neAccount 共用同一探测：App.vue 与 NeteaseTab.vue 挂载时各调一次、
+     *  之后每次进网易云页再调，不缓存会白打网络并挤占网易云频控预算（README「限速范围」条）。 */
     neAuthStatus: async () => {
       const hasFile = neAuth.getStatus().loggedIn
       if (!hasFile) {
         neSessionExpired = false
-        neStatusCache = null
+        neAccountCache = null
         return { loggedIn: false }
       }
-      if (neStatusCache && Date.now() - neStatusCache.at < NE_STATUS_TTL_MS) return neStatusCache.value
-      let value: { loggedIn: boolean; sessionExpired?: boolean }
+      let acc: NeAccount
       try {
-        const acc = await neAccountChecked(neClient)
-        if (neLoggedInFromAccount(acc)) {
-          neSessionExpired = false
-          value = { loggedIn: true, sessionExpired: false }
-        } else {
-          neSessionExpired = true
-          value = { loggedIn: false, sessionExpired: true }
-        }
+        acc = await neAccountProbe()
       } catch {
-        // 探测本身失败：无法判定，保留文件判据且不标记失效
-        value = { loggedIn: true, sessionExpired: neSessionExpired }
+        // 探测本身失败：无法判定，保留文件判据且不标记失效（不写缓存 → 下次调用真重探）
+        return { loggedIn: true, sessionExpired: neSessionExpired }
       }
-      neStatusCache = { at: Date.now(), value }
-      return value
+      if (neLoggedInFromAccount(acc)) {
+        neSessionExpired = false
+        return { loggedIn: true, sessionExpired: false }
+      }
+      neSessionExpired = true
+      return { loggedIn: false, sessionExpired: true }
     },
     neAuthClear: () => {
-      neStatusCache = null
+      neAccountCache = null
       neAuth.clear()
       neClient.setCookie('')
       clearNeteaseTrackIdsCache()
       neSessionExpired = false
     },
     neAuthSaveFromWindow: (header: string) => {
-      neStatusCache = null
+      neAccountCache = null
       neAuth.saveCookie(header)
       neClient.setCookie(header)
       clearNeteaseTrackIdsCache()

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createNeClient } from '../src/main/neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccount, nePlaylistPage } from '../src/main/neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccountChecked, nePlaylistPage } from '../src/main/neteaseapi/tracks'
 
 const fx = (n: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'netease', n), 'utf-8')
 
@@ -148,23 +148,20 @@ describe('neGetTrackDetail', () => {
   })
 })
 
-describe('neAccount', () => {
-  it('登录态取 uid/昵称；无 profile 返回 null', async () => {
+describe('neAccountChecked', () => {
+  it('登录态取 uid/昵称；无 profile 返回 null（服务端确认不认＝权威否定结论）', async () => {
     const client = createNeClient(routedFetch())
-    const acc = await neAccount(client)
+    const acc = await neAccountChecked(client)
     expect(acc?.uid).toBe(1597610302)
     expect(acc?.nickname).toBeTruthy()
-  })
-  it('无 profile（未登录/风控）返回 null', async () => {
-    const client = createNeClient(routedFetch())
     const plain = createNeClient((async (input: any) => {
       const url = String(input)
       return new Response(url.includes('/api/nuser/account/get') ? '{"code":301}' : '{}', { status: 200 })
     }) as unknown as typeof fetch)
-    expect(await neAccount(client)).not.toBeNull()
-    expect(await neAccount(plain)).toBeNull()
-    // 接口异常（非 JSON/网络错误）也按未登录容错
+    expect(await neAccountChecked(plain)).toBeNull()
+  })
+  it('传输异常上抛，不得塌缩成 null（吞异常壳 2026-10-07 已删：调用方靠它区分「过期」与「断网」）', async () => {
     const broken = createNeClient((async () => { throw new Error('net') }) as unknown as typeof fetch)
-    expect(await neAccount(broken)).toBeNull()
+    await expect(neAccountChecked(broken)).rejects.toThrow(/net/)
   })
 })

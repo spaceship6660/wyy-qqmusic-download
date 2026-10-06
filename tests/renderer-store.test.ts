@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDownloadStore } from '../src/renderer/src/stores/download'
+import type { UiQuality } from '../src/renderer/src/stores/download'
 import { isQualityFor, labelForQuality, qualitiesFor } from '../src/renderer/src/qualityOptions'
+// 跨边界只取纯 .ts 常量：vitest 是 node 环境，主进程的档位表能在测试里直接对照
+import { QUALITY_LADDER } from '../src/main/qqapi/urls'
+import { NE_LADDER } from '../src/main/neteaseapi/urls'
+import { DEFAULT_SETTINGS, isValidQuality } from '../src/main/settings'
+import type { Quality as MainQuality } from '../src/main/qqapi/tracks'
+
+/** 类型层同集断言：两侧并集不再互相包含 → 编译期 false → 赋值即 tsc 红灯 */
+type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
 
 describe('download store', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -153,5 +162,38 @@ describe('labelForQuality（降级提示回显实际落档）', () => {
     // 未走完直链解析（如 queued 快照）时 finalQuality 缺省，不报错
     s.onQueueEvent({ id: 'd2', source: 'qq', state: 'queued', progress: 0 } as any)
     expect(s.queue[1].finalQuality).toBeUndefined()
+  })
+})
+
+// 跨层档位守卫（2026-10-07 评审）：选择器词表（renderer/qualityOptions）与主进程降级链
+// （qqapi/urls 的 QUALITY_LADDER、neteaseapi/urls 的 NE_LADDER、settings 的枚举校验）是各自独立的
+// 字面量，此前没有任何东西把它们绑在一起——主进程加一档，渲染侧不报错，那档只是静默选不到。
+describe('档位表跨层同集（选择器 ↔ 主进程降级链）', () => {
+  it('QQ 选择器与 QUALITY_LADDER 同集同序（顺序即降级顺序，也是选择器显示顺序）', () => {
+    expect(qualitiesFor('qq').map((x) => x.v)).toEqual([...QUALITY_LADDER])
+  })
+
+  it('网易云选择器与 NE_LADDER 同集同序', () => {
+    expect(qualitiesFor('netease').map((x) => x.v)).toEqual([...NE_LADDER])
+  })
+
+  it('选择器里的每一档都过主进程枚举校验，且默认档在选择器可见（否则首屏就是非法档）', () => {
+    for (const x of qualitiesFor('qq')) expect(isValidQuality(x.v)).toBe(true)
+    for (const x of qualitiesFor('netease')) expect(isValidQuality(x.v)).toBe(true)
+    expect(qualitiesFor('qq').some((x) => x.v === DEFAULT_SETTINGS.quality)).toBe(true)
+  })
+
+  it('labelForQuality 的超集假设成立：网易云每档都与同名 QQ 档逐字同标签', () => {
+    // 中文名只有一张表（QQ_QUALITIES）。网易云若出现 QQ 没有的档，或两侧同档改名不同步，
+    // 降级徽标就会回显「低品质」——这条把「超集」前提钉住，而不是默认它永远成立。
+    for (const ne of qualitiesFor('netease')) {
+      expect(qualitiesFor('qq').find((x) => x.v === ne.v)?.label).toBe(ne.label)
+      expect(labelForQuality(ne.v)).toBe(ne.label)
+    }
+  })
+
+  it('UiQuality 与主进程 Quality 同集（类型层：任何一侧越界都编译不过）', () => {
+    const tied: Exactly<UiQuality, MainQuality> = true
+    expect(tied).toBe(true)
   })
 })

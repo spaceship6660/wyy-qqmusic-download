@@ -286,6 +286,19 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     expect(env.events.doneFinalQuality).toEqual(['128'])
   })
 
+  it('I2b: 重取直链后落回用户所选档 → downgraded 必须覆写为 false（sticky-OR 会显「已降级为 320k」）', async () => {
+    // 首解只给到 128k（downgraded=true），该直链 403 → 重取拿到 320k（downgraded=false）。
+    // 留下文件的是重取那次，降级标记必须跟着它一起覆写；旧写法 `if (fresh.downgraded) job.downgraded = true`
+    // 与 finalQuality 的覆写不同源，徽标会读成「已降级为 320k」——而降到的正是用户要的档。
+    const env = await makeEnv({ purls: ['M500low.mp3', 'M800final.mp3'], failFirst: { '/M500low.mp3': 1 } })
+    env.app.enqueue({ tracks: [track('rd', '覆写歌')], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(env.recorded).toEqual(['/M500low.mp3', '/M800final.mp3'])
+    expect(env.events.doneFinalQuality).toEqual(['320'])
+    expect(env.events.doneDowngraded).toEqual([false])
+  })
+
   it('I8: 该曲只登记 128k（无无损/320）→ 候选收窄为登记档位，自动降级成功', async () => {
     // 回归锚（2026-09-27 用户实测《我无法用我的语言》）：服务端只按候选**首位**核发直链，
     // 旧实现「无损起全量候选」首位是不存在的 flac → 整批回空 → 报错（用户以为是「没做音质回退」）。
@@ -749,6 +762,92 @@ describe('ne:account 会话判据（2026-10-07 断网误报「登录已失效」
     // 旧实现走 neAccount 壳（异常吞成 null），断网时 resolve null → 侧栏误置「登录已失效」。
     // 反锚：handler 退回 neAccount 壳后本用例即失败（resolve 而非 reject）。
     await expect(app.neAccount()).rejects.toThrow(/fetch failed/)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+// 会话探测单点化（2026-10-07 阶段评审）：neAuthStatus 走 60s 缓存、neAccount 每次真探，
+// 于是启动打两次 /api/nuser/account/get，且两条判据取自不同时刻——同一屏可以一边「已登录」一边
+// 「登录已失效」。现在两个消费方读同一份结论：一个窗口一次探测。
+describe('ne 会话探测单点缓存', () => {
+  const neDirWithCookie = (): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ne-probe-'))
+    fs.writeFileSync(path.join(dir, 'netease_cookie.json'), JSON.stringify({ cookie: 'MUSIC_U=AAA; __csrf=B' }), 'utf-8')
+    return dir
+  }
+  const acctRes = (uid: number, nickname = 'x'): Response =>
+    new Response(JSON.stringify({ code: 200, profile: { userId: uid, nickname } }))
+  // 空响应＝网易云风控：client.getJson 当确定性错误立即上抛（不触发 1s/2s 退避，用例不白等）
+  const blockedRes = (): Response => new Response('', { status: 200 })
+
+  it('一个窗口只探一次：neAuthStatus 之后接 neAccount 不再重复打网络', async () => {
+    const dir = neDirWithCookie()
+    const f = vi.fn(async () => acctRes(777, '昵称')) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    const s = await app.neAuthStatus() // App.vue 挂载的第一路
+    const acc = await app.neAccount() // 同一次挂载里 refreshNePlaylists / NeteaseTab 的第二路
+    expect(f).toHaveBeenCalledTimes(1) // 旧实现：neAccount 不读缓存 → 这里已经是第 2 次
+    expect(s).toEqual({ loggedIn: true, sessionExpired: false })
+    expect(acc).toEqual({ uid: 777, nickname: '昵称' })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('两条判据同源：服务端确认不认时 neAuthStatus 与 neAccount 给同一个结论', async () => {
+    const dir = neDirWithCookie()
+    const f = vi.fn(async () => new Response(JSON.stringify({ code: 200, profile: {} }))) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    expect(await app.neAuthStatus()).toEqual({ loggedIn: false, sessionExpired: true })
+    expect(await app.neAccount()).toBeNull()
+    expect(f).toHaveBeenCalledTimes(1)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('探测失败不算结论：不进缓存（下次真重探）、一旦探通两个消费方立刻共用', async () => {
+    const dir = neDirWithCookie()
+    let n = 0
+    const f = vi.fn(async () => (++n === 1 ? blockedRes() : acctRes(777, '昵称'))) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    expect(await app.neAuthStatus()).toEqual({ loggedIn: true, sessionExpired: false }) // 判不了：沿用文件判据
+    expect(await app.neAuthStatus()).toEqual({ loggedIn: true, sessionExpired: false })
+    expect(f).toHaveBeenCalledTimes(2) // 旧实现把「判不了」也缓存了 → 这里只会打 1 次
+    expect(await app.neAccount()).toEqual({ uid: 777, nickname: '昵称' })
+    expect(f).toHaveBeenCalledTimes(2) // 成功那次进缓存，第二个消费方复用
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('neAuthImport 既失效缓存也清失效标记：离线时导入新 cookie 不再残留「登录已失效」', async () => {
+    const dir = neDirWithCookie()
+    let n = 0
+    // 第 1 次服务端确认不认（置 sessionExpired），之后断网/风控（判不了，沿用上次的标记）
+    const f = vi.fn(async () => (++n === 1 ? new Response(JSON.stringify({ code: 200, profile: {} })) : blockedRes())) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    expect(await app.neAuthStatus()).toEqual({ loggedIn: false, sessionExpired: true })
+    expect(app.neAuthImport('MUSIC_U=NEW; __csrf=C')).toBe(true)
+    // 旧实现只清缓存不清 neSessionExpired：catch 分支把过期标记一路带到侧栏
+    expect(await app.neAuthStatus()).toEqual({ loggedIn: true, sessionExpired: false })
+    expect(f).toHaveBeenCalledTimes(2) // 缓存确被导入失效掉了（否则直接回用上一次的结论）
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('neAuthSaveFromWindow 失效缓存：扫码登录后必须真重探', async () => {
+    const dir = neDirWithCookie()
+    const f = vi.fn(async () => acctRes(777)) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    await app.neAuthStatus()
+    app.neAuthSaveFromWindow('MUSIC_U=NEWH; __csrf=B')
+    await app.neAuthStatus()
+    expect(f).toHaveBeenCalledTimes(2)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('neAuthClear 失效缓存：退出后用 neAccount 看出是否真重探（它没有文件判据可短路）', async () => {
+    const dir = neDirWithCookie()
+    const f = vi.fn(async () => acctRes(777)) as unknown as typeof fetch
+    const app = createApp({ userDataDir: dir, fetchImpl: f })
+    await app.neAccount()
+    app.neAuthClear()
+    await app.neAccount()
+    expect(f).toHaveBeenCalledTimes(2)
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })

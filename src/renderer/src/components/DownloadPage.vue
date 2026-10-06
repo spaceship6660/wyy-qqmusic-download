@@ -93,7 +93,9 @@ async function cancel(jobId: string): Promise<void> {
         </div>
         <div class="bar" v-if="j.state === 'queued' || j.state === 'running'"><div class="bar-inner" :style="{ width: `${Math.min(100, Math.max(0, j.progress))}%` }"></div></div>
         <div class="foot" v-if="j.error || j.downgraded || j.anonFallback || (j.state === 'done' && j.outputPath) || j.state === 'failed'">
-          <span v-if="j.downgraded" class="downgrade">已降级为 {{ labelForQuality(j.finalQuality) }}</span>
+          <!-- 失败行不标降级：那次产物已被删除，徽标声称的落档没有写进任何文件（匿名兜底那条标的是「试过」，
+               失败行仍成立，故不跟着一起收口） -->
+          <span v-if="j.downgraded && j.state !== 'failed'" class="downgrade">已降级为 {{ labelForQuality(j.finalQuality) }}</span>
           <span v-if="j.anonFallback" class="anonfb" title="登录态直链被拒，自动改走匿名下载完成">已切匿名下载</span>
           <span v-if="j.error" class="error">{{ j.error }}</span>
           <button v-if="j.state === 'failed'" class="retry-btn" :disabled="retrying.has(j.id)" @click="retry(j.id)">
