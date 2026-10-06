@@ -2,9 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createNeClient } from '../src/main/neteaseapi/client'
-import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccountChecked, nePlaylistPage } from '../src/main/neteaseapi/tracks'
+import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neteaseTrackToDto, neAccountChecked, nePlaylistPage, neAlbumSongs, neAlbumInfo } from '../src/main/neteaseapi/tracks'
 
 const fx = (n: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'netease', n), 'utf-8')
+
+// mock client（0.7.0 专辑用例用）：URL → Response，逐例自带响应体
+function mockNeClient(handler: (url: string) => Response) {
+  return createNeClient((async (input: any) => handler(String(input))) as unknown as typeof fetch)
+}
 
 function routedFetch(): typeof fetch {
   return vi.fn(async (input: any) => {
@@ -163,5 +168,106 @@ describe('neAccountChecked', () => {
   it('传输异常上抛，不得塌缩成 null（吞异常壳 2026-10-07 已删：调用方靠它区分「过期」与「断网」）', async () => {
     const broken = createNeClient((async () => { throw new Error('net') }) as unknown as typeof fetch)
     await expect(neAccountChecked(broken)).rejects.toThrow(/net/)
+  })
+})
+// --- 0.7.0 专辑封装（Task 7）---
+
+function neAlbumResponse(over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    code: 200,
+    album: {
+      id: 74829483, name: '奇爱人生 LOVE ELEGIA', artist: { name: '阿良良木健' },
+      publishTime: 1558310400000, company: null, picUrl: 'https://p/1.jpg', size: 13,
+    },
+    songs: [{
+      id: 1356370987, name: '告别曲', no: 1, cd: '01',
+      ar: [{ name: '阿良良木健' }], al: { name: '奇爱人生 LOVE ELEGIA', picUrl: 'https://p/1.jpg' },
+      dt: 300000, fee: 1,
+    }],
+    ...over,
+  })
+}
+
+describe('neAlbumInfo（0.7.0 专辑封装）', () => {
+  it('一次请求同时拿到专辑元数据与带序号的曲目', async () => {
+    const urls: string[] = []
+    const client = mockNeClient((u: string) => {
+      urls.push(u)
+      return new Response(neAlbumResponse(), { status: 200 })
+    })
+    const r = await neAlbumInfo(client, 74829483)
+    expect(urls.length).toBe(1) // 零额外请求：album 与 songs 同响应
+    expect(urls[0]).toContain('https://music.163.com/api/v1/album/74829483')
+    expect(r.bundle).toMatchObject({ source: 'netease', id: '74829483', name: '奇爱人生 LOVE ELEGIA', artist: '阿良良木健', totalTracks: 1 })
+    expect(r.bundle.company).toBe('')
+    expect(r.tracks[0]).toMatchObject({ trackNo: 1, disc: 1 })
+  })
+
+  it('专辑对象在 album 键（不是 info）：认错了就等于什么都没接到（2026-10-06 探针实锤）', async () => {
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ album: undefined, info: { name: '奇爱人生' } }), { status: 200 })), 74829483)
+    expect(r.bundle.name).toBe('未知专辑')
+    expect(r.bundle.artist).toBe('未知歌手')
+    expect(r.bundle.coverUrl).toBe('')
+    expect(r.bundle.date).toBe('')
+    expect(r.bundle.id).toBe('74829483') // album.id 缺失时退回请求的 id
+    expect(r.tracks.length).toBe(1)     // 曲目仍接得出，不能整页空
+  })
+
+  it('publishTime 毫秒时间戳 → YYYY-MM-DD；company 可为 null → 空串', async () => {
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ album: { id: 1, name: 'A', publishTime: 1558310400000, company: null } }), { status: 200 })), 1)
+    expect(r.bundle.date).toMatch(/^2019-\d{2}-\d{2}$/)
+    expect(r.bundle.company).toBe('')
+    const r2 = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ album: { id: 1, name: 'A', publishTime: '2019-05-20', company: '某某唱片' } }), { status: 200 })), 1)
+    expect(r2.bundle.date).toBe('2019-05-20')
+    expect(r2.bundle.company).toBe('某某唱片')
+    const r3 = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ album: { id: 1, name: 'A' } }), { status: 200 })), 1)
+    expect(r3.bundle.date).toBe('')
+  })
+
+  it('no 缺失/非法 → 数组下标 +1；cd 缺失或 "00" → 碟 1（实测 no=1、cd="01"）', async () => {
+    const songs = [
+      { id: 1, name: 'A' },
+      { id: 2, name: 'B', cd: '00' },
+      { id: 3, name: 'C', no: 0 },
+      { id: 4, name: 'D', no: 7, cd: '02' },
+    ]
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
+    expect(r.tracks.map((x) => x.trackNo)).toEqual([1, 2, 3, 7])
+    expect(r.tracks.map((x) => x.disc)).toEqual([1, 1, 1, 2])
+    expect(r.bundle.discs).toEqual([1, 2])
+  })
+
+  it('曲目映射逐字段仍是 neteaseTrackToDto 的产物（spread 只加 trackNo/disc）', async () => {
+    const songs = [{
+      id: 5, name: 'A', no: 3, cd: '02', ar: [{ name: 'X' }, { name: 'Y' }],
+      al: { name: 'AL', picUrl: 'http://c/1.jpg' }, dt: 269400, fee: 0,
+    }]
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
+    expect(r.tracks[0]).toEqual({
+      id: '5', name: 'A', artist: 'X / Y', album: 'AL', cover: 'http://c/1.jpg',
+      duration: 269, vip: false, trackNo: 3, disc: 2,
+    })
+  })
+
+  it('songs 缺失/非数组/为空 → tracks: [] 且 totalTracks: 0（空专辑要让调用方认得出来）', async () => {
+    for (const body of ['{}', '{"code":200}', '{"album":{}}', neAlbumResponse({ songs: [] }), neAlbumResponse({ songs: null })]) {
+      const r = await neAlbumInfo(mockNeClient(() => new Response(body, { status: 200 })), 1)
+      expect(r.tracks).toEqual([])
+      expect(r.bundle.totalTracks).toBe(0)
+      expect(r.bundle.discs).toEqual([1])
+    }
+  })
+
+  it('totalTracks 用 songs 实长，不信 album.size（QQ 侧实测过口径不一致）', async () => {
+    const songs = [{ id: 1 }, { id: 2 }, { id: 3 }].map((s) => ({ ...s, name: 'n' }))
+    const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs, album: { id: 9, name: 'A', size: 13 } }), { status: 200 })), 9)
+    expect(r.bundle.totalTracks).toBe(3)
+  })
+
+  it('neAlbumSongs 兼容壳：仍回数组、仍丢弃无 id 条目，序号按过滤前的原始下标', async () => {
+    const songs = [{ id: 1, name: 'A' }, { name: '脏条目' }, { id: 3, name: 'C' }]
+    const tracks = await neAlbumSongs(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
+    expect(tracks.map((x) => x.id)).toEqual(['1', '3'])
+    expect(tracks.map((x) => x.trackNo)).toEqual([1, 3])
   })
 })

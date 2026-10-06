@@ -1,5 +1,6 @@
 import type { TrackDTO } from '../qqapi/tracks'
 import type { NeClient } from './client'
+import { mkBundle, normalizeDate, discOf, type AlbumPage } from '../albumBundle'
 
 export interface PlaylistDTO {
   id: number
@@ -125,10 +126,30 @@ export async function neSearchAlbums(client: NeClient, q: string): Promise<NeAlb
     }))
 }
 
-/** 专辑歌曲（api/v1/album/{id} → songs；2026-09-06 实测可用，api/album?id= 已下线） */
+/** 专辑详情（含专辑级元数据 + 每曲 no/cd）。专辑对象是 `album`（不是 `info`），
+ *  与曲目列表在同一次响应里 → 零额外请求（2026-10-06 探针实锤，别再照 `info` 写、也别加第二次请求）。
+ *  曲目映射复用同文件已有的 neteaseTrackToDto（双形状兼容，经过测试），不另写一份。 */
+export async function neAlbumInfo(client: NeClient, id: number): Promise<AlbumPage> {
+  const json = await client.getJson<any>(`https://music.163.com/api/v1/album/${id}`)
+  const a = json?.album ?? {}
+  const songs = (Array.isArray(json?.songs) ? json.songs : []) as any[]
+  // 无 id 的脏条目丢弃（沿用 neAlbumSongs 的既有行为，否则 neteaseTrackToDto 会拼出 id:'undefined' 的假曲目）；
+  // 下标取过滤前的原始位置，保证 no 缺失时序号仍与发行序一致
+  const tracks: TrackDTO[] = songs.flatMap((s, i) => (s?.id ? [{
+    ...neteaseTrackToDto(s),
+    trackNo: (typeof s?.no === 'number' && s.no >= 1 ? s.no : undefined) ?? i + 1,
+    disc: discOf(s?.cd),          // 实测是 '01' 这种字符串，discOf 认；'00'/缺失 → 单碟
+  }] : []))
+  const bundle = mkBundle(
+    'netease', String(a?.id ?? id), a?.name ?? '', a?.artist?.name ?? '', normalizeDate(a?.publishTime),
+    typeof a?.company === 'string' ? a.company : '', a?.picUrl ?? '', tracks,
+  )
+  return { bundle, tracks }
+}
+
+/** 兼容壳：只要曲目列表的调用方 */
 export async function neAlbumSongs(client: NeClient, id: number): Promise<TrackDTO[]> {
-  const json = await client.getJson<{ songs?: any[] }>(`https://music.163.com/api/v1/album/${id}`)
-  return (json?.songs ?? []).filter((t) => t?.id).map(neteaseTrackToDto)
+  return (await neAlbumInfo(client, id)).tracks
 }
 
 export interface NePlaylistPage {
