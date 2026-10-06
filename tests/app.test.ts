@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createApp } from '../src/main/app'
 import type { App } from '../src/main/app'
-import type { TrackDTO } from '../src/main/qqapi/tracks'
+import type { Quality, TrackDTO } from '../src/main/qqapi/tracks'
 import NodeID3 from 'node-id3'
 import { parseFile } from 'music-metadata'
 
@@ -55,6 +55,8 @@ async function startServer(delayMs = 0, failFirst: Record<string, number> = {}) 
  * - get_song_detail_yqq：默认返回正常 track_info；detailBroken 时返回缺 data 的坏形状
  *   （postMusicu 路径缺失 → QqApiError）。
  * 另外路由网易云直链/歌词/详情接口（按 URL 区分，与 musicu.fcg 互不干扰；NE runner 集成用例用）。
+ * 网易云直链按「请求 br + 是否挂 MUSIC_U」核发档位（匿名问无损也只回 320k，与线上实测一致），
+ * 这样账户/匿名两次解析能给出不同档，降级与改道的落档回显才测得出来。
  */
 function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: boolean; searchHits?: any[]; deadVkey?: boolean; neDeadUrl?: boolean; loginExpired?: boolean; detailSizes?: Record<string, number> }) {
   let vkeyCalls = 0
@@ -77,9 +79,19 @@ function makeFetchImpl(opts: { port: number; purls?: string[]; detailBroken?: bo
       // 网易云直链：本地 server 的 /ne.mp3（320 档直接命中，不触发降级）；
       // neDeadUrl 时回空 url（模拟会员/无版权拿不到直链）
       const dead = opts.neDeadUrl
+      // 档位按「请求 br + 是否挂 MUSIC_U」核发（见 neteaseapi/cdn.ts 实测：匿名问 br=999000 也只回 320k），
+      // 无损还走独立路径 /ne.flac —— 这样 R5 能把「账户那次解析的档」与「匿名改道后实际落档」分开，
+      // 否则两次解析同档，finalQuality 断言会被账户那次写顺手满足（测不出「改道后必须覆写」）。
+      const musicU = /(^|;)\s*MUSIC_U=/.test((init?.headers as Record<string, string> | undefined)?.['cookie'] ?? '')
+      const lossless = !dead && musicU && /br=999000/.test(url)
       return new Response(JSON.stringify({
         code: 200,
-        data: [{ id: 123, url: dead ? null : `http://127.0.0.1:${opts.port}/ne.mp3`, br: 320000, code: 200 }],
+        data: [{
+          id: 123,
+          url: dead ? null : `http://127.0.0.1:${opts.port}${lossless ? '/ne.flac' : '/ne.mp3'}`,
+          br: lossless ? 1065126 : 320000,
+          code: 200,
+        }],
       }), { status: 200 })
     }
     if (url.includes('/api/song/lyric')) {
@@ -168,7 +180,7 @@ interface Env {
   dl: string      // 下载目录
   server: http.Server
   recorded: string[]   // 下载源实际收到的路径
-  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; doneDowngraded: Array<boolean | undefined>; failedErrors: string[]; startIds: string[]; failedIds: string[] }
+  events: { start: number; done: number; failed: number; active: number; peak: number; donePaths: string[]; doneAnon: Array<boolean | undefined>; doneDowngraded: Array<boolean | undefined>; doneFinalQuality: Array<Quality | undefined>; failedErrors: string[]; startIds: string[]; failedIds: string[] }
   fetchMock: ReturnType<typeof vi.fn>
 }
 
@@ -190,13 +202,13 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
   )
   const { server, port, recorded } = await startServer(opts.delayMs ?? 0, opts.failFirst ?? {})
   const fetchImpl = makeFetchImpl({ port, purls: opts.purls, detailBroken: opts.detailBroken, searchHits: opts.searchHits, deadVkey: opts.deadVkey, neDeadUrl: opts.neDeadUrl, loginExpired: opts.loginExpired, detailSizes: opts.detailSizes })
-  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, doneDowngraded: [] as Array<boolean | undefined>, failedErrors: [] as string[], startIds: [] as string[], failedIds: [] as string[] }
+  const events = { start: 0, done: 0, failed: 0, active: 0, peak: 0, donePaths: [] as string[], doneAnon: [] as Array<boolean | undefined>, doneDowngraded: [] as Array<boolean | undefined>, doneFinalQuality: [] as Array<Quality | undefined>, failedErrors: [] as string[], startIds: [] as string[], failedIds: [] as string[] }
   const app = createApp({
     userDataDir: dir,
     fetchImpl,
     neCdnFallbackUrls: opts.neCdnFallbackUrls,
     emitEvent: (ch, payload) => {
-      const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; downgraded?: boolean; error?: string }
+      const p = payload as { id?: string; outputPath?: string; anonFallback?: boolean; downgraded?: boolean; finalQuality?: Quality; error?: string }
       if (ch === 'dl:jobStart') {
         events.start++
         events.active++
@@ -209,6 +221,7 @@ async function makeEnv(opts: { concurrency?: number; delayMs?: number; detailBro
         if (p.outputPath) events.donePaths.push(p.outputPath)
         events.doneAnon.push(p.anonFallback)
         events.doneDowngraded.push(p.downgraded)
+        events.doneFinalQuality.push(p.finalQuality)
       }
       if (ch === 'dl:failed') {
         events.failed++
@@ -256,17 +269,21 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   })
 
   it('I2: 404 直链 → 重取直链再下成功（404 不白等重试）', async () => {
-    // 第一次 vkey 给出的直链 404，第二次 200；断言下载源恰好收到两次请求
-    const env = await makeEnv({ purls: ['gone.mp3', 'ok.mp3'] })
+    // 第一次 vkey 给出的直链 404，第二次 200；断言下载源恰好收到两次请求。
+    // 重取那次故意给**更低一档**（purl 前缀 M500=128k）：两次解析不同档，才能证明 finalQuality
+    // 记的是「留下文件的那次」，而不是首次解析顺手写上的值。
+    const env = await makeEnv({ purls: ['gone.mp3', 'M500ok.mp3'] })
     env.app.enqueue({ tracks: [track('x', '直链歌')], quality: '320', source: 'qq' })
     await waitFor(() => env.events.done >= 1)
     expect(env.events.failed).toBe(0)
-    expect(env.recorded).toEqual(['/gone.mp3', '/ok.mp3']) // 无 3 次×退避重试
+    expect(env.recorded).toEqual(['/gone.mp3', '/M500ok.mp3']) // 无 3 次×退避重试
     const files = fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))
     expect(files.length).toBe(1)
     const out = fs.readFileSync(path.join(env.dl, files[0]))
     expect(out.length).toBeGreaterThan(PAYLOAD.length) // 下载成功并经标签内嵌
     expect((NodeID3.read(path.join(env.dl, files[0])) as any).title).toBe('直链歌')
+    // 落盘的是重取拿到的 128k，回显就必须是 128：重取那次也得覆写，否则徽标显示首次解析的 320（虚高）
+    expect(env.events.doneFinalQuality).toEqual(['128'])
   })
 
   it('I8: 该曲只登记 128k（无无损/320）→ 候选收窄为登记档位，自动降级成功', async () => {
@@ -277,7 +294,9 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     env.app.enqueue({ tracks: [track('q5', '只有128k')], quality: 'flac', source: 'qq' })
     await waitFor(() => env.events.done >= 1)
     expect(fs.readdirSync(env.dl)).toEqual(['只有128k - 同歌手.mp3']) // 扩展名证明降级到 128k mp3
-    expect(env.events.doneDowngraded).toEqual([true]) // 渲染器据此显示「已降级为低品质」
+    expect(env.events.doneDowngraded).toEqual([true]) // 渲染器据此标记「已降级」
+    // 徽标回显的是**实际落档**（128），不是用户请求的 flac——主进程没记 finalQuality 就显示不出来
+    expect(env.events.doneFinalQuality).toEqual(['128'])
   })
 
   it('I9: 候选仍混入不存在的档位时整批失败（服务端只认首位）—— 收窄是必需的，不是可选优化', async () => {
@@ -464,19 +483,26 @@ describe('createApp runner 装配（T10 评审修复）', () => {
   })
 
   it('R5: 网易云账户直链 403 → 自动改走匿名成功并标记 anonFallback', async () => {
-    // 本地源前 2 次 403（账户初下 + 重取直链再下），第 3 次（匿名）200
-    const env = await makeEnv({ failFirst: { '/ne.mp3': 2 } })
+    // 账户那次问无损、服务端按凭证回 flac（本地源 /ne.flac 前 2 次 403：初下 + 重取直链再下）；
+    // 改匿名后同一 br=999000 只回 320k（/ne.mp3），第 3 次请求 200。
+    // 两档必须不同：否则「匿名覆写」与「账户那次遗留的值」看不出差别，finalQuality 断言形同虚设。
+    const env = await makeEnv({ failFirst: { '/ne.flac': 2 } })
+    expect(env.app.neAuthImport('MUSIC_U=test;')).toBe(true)
     env.app.enqueue({
       tracks: [{ id: '123', name: '匿名兜底歌', artist: '手', album: '', cover: '' }],
-      quality: '320',
+      quality: 'flac',
       source: 'netease',
     })
     await waitFor(() => env.events.done >= 1)
     expect(env.events.failed).toBe(0)
-    expect(env.recorded).toEqual(['/ne.mp3', '/ne.mp3', '/ne.mp3'])
+    expect(env.recorded).toEqual(['/ne.flac', '/ne.flac', '/ne.mp3'])
     expect(env.events.doneAnon).toEqual([true])
+    // 留在盘上的是匿名那次的 320k，回显就必须是 320：账户那次写的 flac 要被匿名改道覆写，
+    // 且覆写发生在占位/下载之前——「凡是留下文件的运行都记着该文件的档」正是这条链路的要害
+    expect(env.events.doneFinalQuality).toEqual(['320'])
     const files = fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))
     expect(files.length).toBe(1)
+    expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.flac'))).toEqual([]) // 账户半成品已清，不留冒充实无损的 0 字节 flac
   })
 
   it('R6: 网易云持续 403 → 匿名也 403 才失败（账户 2 次 + 匿名 2 次）', async () => {
