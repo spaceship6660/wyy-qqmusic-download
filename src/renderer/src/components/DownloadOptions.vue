@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { useDownloadStore } from '../stores/download'
-import { isQualityFor, qualitiesFor, resolveQuality, type Quality } from '../qualityOptions'
+import { isQualityFor, qualitiesFor, type Quality, type QualitySource } from '../qualityOptions'
 import { api } from '../api'
 
 // 下载时选择器：码率 + 歌词模式（本次下载批次生效；改动即持久化为默认值，
@@ -9,7 +9,7 @@ import { api } from '../api'
 //
 // source 决定可见档位（档位表与规则在 qualityOptions.ts）：APE/m4a 是 QQ 独有档，
 // 网易云没有对应 br，摆过去会静默丢无损；当前档位不在可见档内时立即回落无损并持久化。
-const props = defineProps<{ source: 'qq' | 'netease' }>()
+const props = defineProps<{ source: QualitySource }>()
 const store = useDownloadStore()
 
 const visible = computed(() => qualitiesFor(props.source))
@@ -24,12 +24,12 @@ function setLyricMode(m: 'both' | 'embed' | 'lrc' | 'none'): void {
   void api.invoke('settings:set', { lyricMode: m })
 }
 
-// immediate 保证首次挂载即校正：settings.json 里可能残留另一源写入的档位（如 QQ 侧选过 ape），
-// 不回落就会带着无效档位进下载管线。resolveQuality 已合法时原样返回，回落一次即收敛不循环。
+// immediate 保证首次挂载即校正：settings.json 的 quality 是两个源共用的一份全局档，
+// QQ 侧写过 ape 后打开网易云页，得先把它改回无损再进下载管线。
 watch(
   () => [props.source, store.quality] as const,
   () => {
-    if (!isQualityFor(props.source, store.quality)) setQuality(resolveQuality(props.source, store.quality))
+    if (!isQualityFor(props.source, store.quality)) setQuality('flac')
   },
   { immediate: true },
 )

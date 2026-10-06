@@ -29,8 +29,3 @@ export function qualitiesFor(source: QualitySource): Array<{ v: Quality; label: 
 export function isQualityFor(source: QualitySource, q: Quality): boolean {
   return qualitiesFor(source).some((x) => x.v === q)
 }
-
-/** 无效档位对本源不可用时回落无损；已合法则原样返回（保证幂等，回落一次即收敛） */
-export function resolveQuality(source: QualitySource, q: Quality): Quality {
-  return isQualityFor(source, q) ? q : 'flac'
-}

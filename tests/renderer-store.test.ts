@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDownloadStore } from '../src/renderer/src/stores/download'
-import { isQualityFor, qualitiesFor, resolveQuality } from '../src/renderer/src/qualityOptions'
+import { isQualityFor, qualitiesFor } from '../src/renderer/src/qualityOptions'
 
 describe('download store', () => {
   beforeEach(() => setActivePinia(createPinia()))
@@ -103,24 +103,22 @@ describe('码率档位按源过滤（DownloadOptions 的规则层，纯函数）
     expect(isQualityFor('qq', 'm4a')).toBe(true)
   })
 
-  it('resolveQuality：跨源残留的 ape 在网易云回落无损，合法档原样保留', () => {
-    // settings.json 的 quality 是全局持久化的，QQ 侧选过 ape 后切到网易云会带着它进下载管线
-    expect(resolveQuality('netease', 'ape')).toBe('flac')
-    expect(resolveQuality('netease', 'm4a')).toBe('flac')
-    expect(resolveQuality('netease', '320')).toBe('320')
-    expect(resolveQuality('netease', 'flac')).toBe('flac')
-    expect(resolveQuality('qq', 'ape')).toBe('ape') // QQ 侧 ape 合法，不得被改写
+  it('回落判定：网易云需要修正的只有 QQ 独有的 ape/m4a', () => {
+    // settings.json 的 quality 是两个源共用的一份，QQ 侧选过 ape 后切到网易云会带着它进下载管线
+    expect(qualitiesFor('qq').map((q) => q.v).filter((v) => !isQualityFor('netease', v))).toEqual(['ape', 'm4a'])
+    expect(isQualityFor('qq', 'ape')).toBe(true) // QQ 侧 ape 合法，回落不能把它改掉
+    // 回落写死字面 flac：两个源都提供它，所以一次回落就落在本源可见档内，watch 不再触发第二次
+    expect(isQualityFor('netease', 'flac')).toBe(true)
+    expect(isQualityFor('qq', 'flac')).toBe(true)
   })
 
   it('回落写回 store 后当前档一定落在本源可见档内（组件 watch 的等价断言）', () => {
     const s = useDownloadStore()
     s.setQuality('ape')
-    const next = resolveQuality('netease', s.quality)
+    const next = isQualityFor('netease', s.quality) ? s.quality : 'flac'
     s.setQuality(next)
     expect(s.quality).toBe('flac')
     expect(qualitiesFor('netease').some((x) => x.v === s.quality)).toBe(true)
     expect(isQualityFor('netease', s.quality)).toBe(true)
-    // 幂等：已回落到位时不再产生第二次改动（否则 watch 会自激循环）
-    expect(resolveQuality('netease', s.quality)).toBe(s.quality)
   })
 })
