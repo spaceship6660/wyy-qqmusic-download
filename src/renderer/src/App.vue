@@ -30,6 +30,10 @@ const queueing = ref(false)
 const qqCreated = ref<QqPlaylist[]>([])
 const qqFav = ref<QqPlaylist[]>([])
 const nePlaylists = ref<NePlaylist[]>([])
+// 网易云歌单拉取失败原因（空=正常）。openLiked 据此回显真因，避免一律误报「未登录」
+const nePlaylistError = ref('')
+// 网易云会话失效（cookie 文件在但服务端不认）——侧栏据此把「已登录」改为「登录已失效」
+const neSessionExpired = ref(false)
 
 // 视图：groupView=歌单列表页；songsView=歌曲列表页（含懒加载游标）；albumsView=专辑列表页
 type LoadCursor =
@@ -570,13 +574,27 @@ async function refreshQqPlaylists(): Promise<void> {
   if (firstErr != null) throw firstErr instanceof Error ? firstErr : new Error(String(firstErr))
 }
 
+/** 拉取网易云 uid + 歌单；失败原因不外抛，写入 nePlaylistError 供 openLiked 精确回显。
+ *  此前静默 return：account 拿不到 uid 时 nePlaylists 恒空 → openLiked 一律误报「请确认网易云已登录」，
+ *  查无可查（后端实际健康，问题在渲染层看不到真因）。 */
 async function refreshNePlaylists(): Promise<void> {
-  if (!store.neLoggedIn) return
-  const acc: any = await api.invoke('ne:account')
-  if (acc?.uid) {
+  nePlaylistError.value = ''
+  if (!store.neLoggedIn) {
+    nePlaylistError.value = '网易云未登录'
+    return
+  }
+  try {
+    const acc: any = await api.invoke('ne:account')
+    if (!acc?.uid) {
+      // cookie 文件在但服务端不认（会话过期 / MUSIC_U 失效）→ 权威判据
+      nePlaylistError.value = '网易云登录状态已失效（cookie 过期），请点左下角「退出」后重新扫码登录'
+      return
+    }
     neUid.value = acc.uid
     neNickname.value = acc.nickname ?? ''
     nePlaylists.value = (await api.invoke<NePlaylist[]>('ne:playlists', acc.uid)) ?? []
+  } catch (e) {
+    nePlaylistError.value = `网易云歌单加载失败：${e instanceof Error ? e.message : String(e)}`
   }
 }
 
@@ -612,7 +630,12 @@ async function openLiked(source: 'qq' | 'netease', force = false): Promise<void>
   }
   if (!liked) {
     enterSongsLoading('我喜欢的音乐', 'netease')
-    listNotice.value = '未找到「我喜欢的音乐」歌单（请确认网易云已登录）'
+    // 优先回显权威判据（会话失效）与真实失败原因；
+    // 仅当确实已登录且接口正常返回、却仍无 specialType=5 时才提示「未找到」
+    listNotice.value = nePlaylistError.value
+      || (neSessionExpired.value
+        ? '网易云登录已失效（cookie 过期），请点左下角「退出」后重新登录'
+        : '未找到「我喜欢的音乐」歌单（账号下不存在该歌单，或网易云接口未返回 specialType=5）')
     listLoading.value = false
     return
   }
@@ -774,6 +797,8 @@ async function neLogout(): Promise<void> {
   await api.invoke('ne:auth:clear')
   store.setNeLogin(false)
   nePlaylists.value = []
+  nePlaylistError.value = ''
+  neSessionExpired.value = false
   neNickname.value = ''
   neUid.value = 0
   clearSongsCache('netease')
@@ -787,9 +812,11 @@ function onNeAuthChanged(): void {
   void api.invoke('ne:auth:status').then((s: any) => {
     const ok = !!s?.loggedIn
     store.setNeLogin(ok)
+    neSessionExpired.value = !!s?.sessionExpired
     if (ok) void refreshNePlaylists()
     else {
       nePlaylists.value = []
+      nePlaylistError.value = ''
       neNickname.value = ''
       neUid.value = 0
       clearSongsCache('netease')
@@ -813,6 +840,7 @@ onMounted(() => {
   })
   void api.invoke('ne:auth:status').then((s: any) => {
     store.setNeLogin(!!s?.loggedIn)
+    neSessionExpired.value = !!s?.sessionExpired
     if (s?.loggedIn) void refreshNePlaylists()
   })
   void api.invoke('settings:get').then((s: any) => {
@@ -883,7 +911,9 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           <button v-if="!store.neLoggedIn" class="login-btn ne" @click="neLogin">登录网易云</button>
           <div v-else class="login-row">
             <span class="acct-src">网易云</span>
-            <span class="acct-info">已登录</span>
+            <span class="acct-info" :class="{ expired: neSessionExpired }">{{
+              neSessionExpired ? '登录已失效' : '已登录'
+            }}</span>
             <button class="link-btn" @click="neLogout">退出</button>
           </div>
         </div>
@@ -1025,6 +1055,8 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
 .login-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .acct-src { flex-shrink: 0; width: 46px; font-size: 12px; color: #999; white-space: nowrap; }
 .acct-info { flex: 1; min-width: 0; font-size: 13px; color: #31c27c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 会话失效：绿色「已登录」会让用户以为一切正常（正是本次 bug 的可见症状），改红色告警 */
+.acct-info.expired { color: #d43c33; font-weight: 600; }
 .login-btn.ne { background: #d43c33; }
 .login-btn.ne:hover { background: #b73229; }
 .link-btn {

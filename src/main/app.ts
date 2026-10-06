@@ -63,6 +63,11 @@ export function createApp(deps: AppDeps) {
   const neAuth = createNeAuth({ cookiePath: path.join(deps.userDataDir, 'netease_cookie.json') })
   const savedNe = neAuth.getCookie()
   if (savedNe) neClient.setCookie(savedNe)
+  // 网易云会话有效性：cookie 文件在 ≠ 登录有效（旧 cookie 过期后文件仍在，
+  // 会让侧栏一直显示「已登录」而所有鉴权接口静默失败）。
+  // 判定走权威接口 /api/nuser/account/get（profile.userId 有无）。
+  // 仅当「文件存在且服务端确认无效」才算会话失效；网络抖动导致的探测失败不算（保守，避免误报未登录）。
+  let neSessionExpired = false
   let settings = loadSettings(settingsFile)
 
   const emitEvent = deps.emitEvent ?? (() => {})
@@ -580,16 +585,38 @@ export function createApp(deps: AppDeps) {
       }
       return ok
     },
-    neAuthStatus: () => neAuth.getStatus(),
+    /** 登录态：文件存在 + 服务端确认有效才算「已登录」。
+     *  account 返回 null 时若探测没抛错，即服务端确实不认这份凭证 → sessionExpired。
+     *  探测抛错（网络异常）无法判定，保守沿用文件判据，避免误报未登录。 */
+    neAuthStatus: async () => {
+      const hasFile = neAuth.getStatus().loggedIn
+      if (!hasFile) {
+        neSessionExpired = false
+        return { loggedIn: false }
+      }
+      try {
+        const acc = await neAccount(neClient)
+        if (acc) {
+          neSessionExpired = false
+          return { loggedIn: true, sessionExpired: false }
+        }
+        neSessionExpired = true
+        return { loggedIn: false, sessionExpired: true }
+      } catch {
+        return { loggedIn: true, sessionExpired: neSessionExpired }
+      }
+    },
     neAuthClear: () => {
       neAuth.clear()
       neClient.setCookie('')
       clearNeteaseTrackIdsCache()
+      neSessionExpired = false
     },
     neAuthSaveFromWindow: (header: string) => {
       neAuth.saveCookie(header)
       neClient.setCookie(header)
       clearNeteaseTrackIdsCache()
+      neSessionExpired = false
     },
     unlockRun,
   }
