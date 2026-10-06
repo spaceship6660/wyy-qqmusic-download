@@ -10,7 +10,7 @@ import DownloadPage from './components/DownloadPage.vue'
 import DownloadOptions from './components/DownloadOptions.vue'
 import DownloadFloatCard from './components/DownloadFloatCard.vue'
 import { useDownloadStore } from './stores/download'
-import type { UiTrack } from './stores/download'
+import type { UiTrack, UiAlbumBundle } from './stores/download'
 import { api } from './api'
 
 // 界面模型（2026-09-06 用户定稿）：左侧两级导航。
@@ -44,7 +44,8 @@ type SongsBack =
   | { kind: 'albums'; query: string }
   | { kind: 'group'; source: 'qq' | 'netease'; group: 'created' | 'fav' }
 const groupView = ref<{ source: 'qq' | 'netease'; group: 'created' | 'fav' } | null>(null)
-const songsView = ref<{ title: string; source: 'qq' | 'netease'; total?: number; cursor?: LoadCursor; cacheKey?: string } | null>(null)
+// album：仅专辑来源填充的批次元数据，Task 13 的「下载整张」靠它算目录/cue；非专辑视图为 undefined
+const songsView = ref<{ title: string; source: 'qq' | 'netease'; total?: number; cursor?: LoadCursor; cacheKey?: string; album?: UiAlbumBundle } | null>(null)
 const albumsView = ref<{ source: 'qq' | 'netease'; query: string; albums: Array<{ mid: string; name: string; singer: string; cover: string; songCount: number }> } | null>(null)
 const listNotice = ref('')
 // QQ 搜索页：歌曲 | 专辑
@@ -87,6 +88,8 @@ interface SongsCacheEntry {
   total?: number
   cursor?: LoadCursor
   source: 'qq' | 'netease'
+  /** 专辑批次元数据：只存 songsView 不存这里的话，第二次进同一张专辑走缓存命中分支就丢了 bundle */
+  album?: UiAlbumBundle
   /** 首屏 ids 快照（后台 diff 用） */
   firstIds: string[]
   fetchedAt: number
@@ -175,8 +178,8 @@ function enterSongsLoading(title: string, source: 'qq' | 'netease', opts?: { kee
   return loadSeq
 }
 
-/** 首屏抓取结果（各源 opener 组装；tracks 为空→走 emptyNotice） */
-interface FirstPageResult { tracks: UiTrack[]; total?: number; cursor?: LoadCursor }
+/** 首屏抓取结果（各源 opener 组装；tracks 为空→走 emptyNotice）。album 仅专辑 opener 填 */
+interface FirstPageResult { tracks: UiTrack[]; total?: number; cursor?: LoadCursor; album?: UiAlbumBundle }
 
 /** 歌曲列表统一入口：缓存秒开 + 后台 revalidate（SWR），force=跳过缓存走网络。
  * back=返回目的地；keepAlbums=保留专辑列表（专辑歌曲页返回用）。 */
@@ -201,7 +204,7 @@ async function openSongsView(opts: {
     groupView.value = null
     listNotice.value = ''
     store.setTracks([...hit.tracks], hit.source)
-    songsView.value = { title, source, total: hit.total, cursor: hit.cursor, cacheKey: key }
+    songsView.value = { title, source, total: hit.total, cursor: hit.cursor, cacheKey: key, album: hit.album }
     songsBack.value = back
     listLoading.value = false
     scrollTop()
@@ -219,10 +222,10 @@ async function openSongsView(opts: {
     }
     store.setTracks(fp.tracks, source)
     cacheSongs(key, {
-      tracks: [...fp.tracks], total: fp.total, cursor: fp.cursor, source,
+      tracks: [...fp.tracks], total: fp.total, cursor: fp.cursor, source, album: fp.album,
       firstIds: fp.tracks.map((t) => t.id), fetchedAt: Date.now(),
     })
-    songsView.value = { title, source, total: fp.total, cursor: fp.cursor, cacheKey: key }
+    songsView.value = { title, source, total: fp.total, cursor: fp.cursor, cacheKey: key, album: fp.album }
     songsBack.value = back
   } catch (e) {
     if (my === loadSeq) listNotice.value = e instanceof Error ? e.message : String(e)
@@ -268,9 +271,12 @@ async function revalidateSongs(key: string, opts: {
     store.selectedIds = new Set(sel)
     songsCache.set(key, {
       tracks: [...fp.tracks], total: fp.total, cursor: fp.cursor, source: opts.source,
+      // revalidate 是整包替换缓存条目：album 不在这里续上，后台刷新过一次后 bundle 就被自己的
+      // 新条目冲掉了（下次走缓存命中拿到 undefined，整张入口静默消失）。fp 无 album 时沿用旧值。
+      album: fp.album ?? entry.album,
       firstIds: freshIds, fetchedAt: Date.now(),
     })
-    songsView.value = { ...songsView.value, total: fp.total, cursor: fp.cursor }
+    songsView.value = { ...songsView.value, total: fp.total, cursor: fp.cursor, album: fp.album ?? songsView.value?.album }
     showRevalState(key, `已更新（共 ${fp.total ?? fp.tracks.length} 首）`)
   } catch {
     // 静默：风控/断网都不打扰用户，下次进入再试
@@ -347,7 +353,8 @@ async function doSearch(force = true): Promise<void> {
       if (my !== searchSeq) return
       if (res?.tracks?.length) {
         store.setTracks(res.tracks, 'qq')
-        songsView.value = { title: '链接导入', source: 'qq' }
+        // 链接导入不走 songsCache（无 cacheKey），bundle 只需落进 songsView
+        songsView.value = { title: '链接导入', source: 'qq', album: res.album }
       } else window.alert('未能解析该链接，请确认是 QQ 音乐歌单 / 专辑 / 单曲链接')
       return
     }
@@ -425,7 +432,8 @@ function switchSearchTab(t: 'song' | 'album'): void {
   else void albumSearch()
 }
 
-/** 点开专辑 → 专辑歌曲列表（QQ：fetchAlbum；网易云：api/v1/album；缓存秒开 + 后台 diff 更新） */
+/** 点开专辑 → 专辑歌曲列表（IPC 回 { tracks, album }：bundle 同时进 songsView 与歌曲缓存，
+ *  否则缓存命中那次重建视图就把整张下载的批次上下文丢了；缓存秒开 + 后台 diff 更新） */
 async function openAlbum(mid: string | number, title: string, force = false): Promise<void> {
   const source = albumsView.value?.source ?? songsView.value?.source ?? 'qq'
   const key = `${source}:album:${String(mid)}`
@@ -441,10 +449,11 @@ async function openAlbum(mid: string | number, title: string, force = false): Pr
     force,
     emptyNotice: '专辑为空或加载失败',
     fetchFirst: async () => {
-      const tracks: any =
+      const r: any =
         source === 'qq' ? await api.invoke('qq:albumSongs', mid) : await api.invoke('ne:albumSongs', Number(mid))
+      const tracks = r?.tracks
       if (!Array.isArray(tracks) || tracks.length === 0) return null
-      return { tracks, total: tracks.length }
+      return { tracks, total: tracks.length, album: r.album }
     },
     reload: () => openAlbum(mid, title, true),
   })

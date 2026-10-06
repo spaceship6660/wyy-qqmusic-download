@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDownloadStore } from '../src/renderer/src/stores/download'
-import type { UiQuality } from '../src/renderer/src/stores/download'
+import type { UiAlbumBundle, UiTrack, UiQuality } from '../src/renderer/src/stores/download'
 import { isQualityFor, labelForQuality, qualitiesFor } from '../src/renderer/src/qualityOptions'
 // 跨边界只取纯 .ts 常量：vitest 是 node 环境，主进程的档位表能在测试里直接对照
 import { QUALITY_LADDER } from '../src/main/qqapi/urls'
 import { NE_LADDER } from '../src/main/neteaseapi/urls'
 import { DEFAULT_SETTINGS, isValidQuality } from '../src/main/settings'
-import type { Quality as MainQuality } from '../src/main/qqapi/tracks'
+import type { AlbumBundle } from '../src/main/albumBundle'
+import type { Quality as MainQuality, TrackDTO as MainTrackDTO } from '../src/main/qqapi/tracks'
 
 /** 类型层同集断言：两侧并集不再互相包含 → 编译期 false → 赋值即 tsc 红灯 */
 type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
@@ -34,6 +35,17 @@ describe('download store', () => {
     expect(s.quality).toBe('320')
     s.setQuality('flac')
     expect(s.quality).toBe('flac')
+  })
+
+  it('专辑曲目经 store 原样回传：trackNo/disc 不在渲染侧丢掉', () => {
+    // 勾选/整张入队时 tracks 要从这里原样回给 dl:enqueue；UiTrack 少声明字段的话这个字面量在 tsc
+    // 就编译不过（丢字段的产物是 N 个 '01 曲名' 撞名，Task 10 才看得见）。
+    const s = useDownloadStore()
+    s.setTracks([
+      { id: 'a', name: 'A', artist: 'X', album: 'B', cover: '', trackNo: 1, disc: 1 },
+      { id: 'b', name: 'B', artist: 'X', album: 'B', cover: '', trackNo: 2, disc: 2 },
+    ])
+    expect(s.tracks.map((t) => [t.trackNo, t.disc])).toEqual([[1, 1], [2, 2]])
   })
   it('队列事件镜像：jobStart/progress/done/failed 更新 queue 列表', () => {
     const s = useDownloadStore()
@@ -194,6 +206,20 @@ describe('档位表跨层同集（选择器 ↔ 主进程降级链）', () => {
 
   it('UiQuality 与主进程 Quality 同集（类型层：任何一侧越界都编译不过）', () => {
     const tied: Exactly<UiQuality, MainQuality> = true
+    expect(tied).toBe(true)
+  })
+
+  it('UiTrack 与主进程 TrackDTO 同字段集（类型层：专辑序号漏声明即 tsc 红灯）', () => {
+    // 同形类型是手抄的（渲染工程不 import 主进程模块，原因见 stores/download.ts 头注），漏抄只会
+    // 静默丢字段；可选字段双向可赋，所以钉 keyof 同集而不是单向可赋。
+    const tied: Exactly<keyof UiTrack, keyof MainTrackDTO> = true
+    expect(tied).toBe(true)
+  })
+
+  it('UiAlbumBundle 与主进程 AlbumBundle 同形（整张下载的批次元数据回传不丢字段）', () => {
+    // Task 13 要把渲染侧持有的 bundle 原样送回 dl:enqueue → 主进程拿它算目录与 cue。
+    // 镜像类型少一个字段（或主进程把某字段改成可选）时，双向可赋仍成立、只有同集断言会红。
+    const tied: Exactly<UiAlbumBundle, AlbumBundle> = true
     expect(tied).toBe(true)
   })
 })

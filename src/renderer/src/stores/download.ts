@@ -7,9 +7,29 @@ import type { Quality } from '../qualityOptions'
 export interface UiTrack {
   id: string; name: string; artist: string; album: string; cover: string
   mediaMid?: string; duration?: number; vip?: boolean
+  // 专辑内序号与碟号：仅专辑来源填充。入队时 tracks 原样回传主进程，这里少声明一个字段整张专辑
+  // 就会落盘成 N 个 '01 曲名' 互相撞名。字段集与主进程 TrackDTO 的同集关系由 renderer-store 测试把守。
+  trackNo?: number; disc?: number
 }
 export type UiQuality = Quality
 export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
+
+/** 专辑批次元数据：渲染侧只持有、整张下载时原样回传 dl:enqueue。
+ *  与主进程 AlbumBundle 同形手抄（同 UiTrack 不 import TrackDTO 的理由：渲染工程不含 node 类型，
+ *  import 主进程模块会顺着 albumBundle → fsUtils 的 node:path/node:fs 报 TS2307/TS2591），
+ *  两侧同集由 tests/renderer-store.test.ts 的 Exactly 断言把守。
+ *  字段必须保持纯数据：混进 Set/Map/类实例会让主进程 IPC 出口的 JSON 净化把整包静默变成 undefined。 */
+export interface UiAlbumBundle {
+  source: 'qq' | 'netease'
+  id: string
+  name: string
+  artist: string
+  date: string
+  company: string
+  coverUrl: string
+  totalTracks: number
+  discs: number[]
+}
 
 export interface UiQueueJob {
   id: string; source: string; state: string; progress: number

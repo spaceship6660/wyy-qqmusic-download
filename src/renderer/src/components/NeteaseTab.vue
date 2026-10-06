@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import TrackGrid from './TrackGrid.vue'
 import DownloadOptions from './DownloadOptions.vue'
 import { useDownloadStore } from '../stores/download'
-import type { UiTrack } from '../stores/download'
+import type { UiAlbumBundle, UiTrack } from '../stores/download'
 import { api } from '../api'
 
 // 网易云功能页：登录（扫码/手动导入）+ 搜索（歌曲 | 专辑）。
@@ -38,6 +38,15 @@ function cachePut<K, V>(m: Map<K, V>, k: K, v: V, max = 30): void {
 }
 /** 点开的专辑（内联展示其歌曲，代替跳走；返回专辑列表则清空） */
 const openedAlbum = ref('')
+/** 当前内联展开的专辑元数据（Task 13 的「下载整张」用；非专辑列表时为 null） */
+const openedAlbumBundle = ref<UiAlbumBundle | null>(null)
+
+/** 收起内联专辑视图。bundle 必须与 openedAlbum 同步清空：只清标题的话，列表已经换成搜索结果
+ *  或别的专辑了，持有的批次上下文却还是上一张的——整张下载会写进错误的专辑目录。 */
+function closeAlbum(): void {
+  openedAlbum.value = ''
+  openedAlbumBundle.value = null
+}
 
 async function refreshAuth(): Promise<void> {
   const s: any = await api.invoke('ne:auth:status')
@@ -62,7 +71,7 @@ async function doSearch(force = true): Promise<void> {
     if (hit) {
       albums.value = []
       albumSearched.value = false
-      openedAlbum.value = ''
+      closeAlbum()
       store.setTracks([...hit], 'netease')
       return
     }
@@ -72,7 +81,7 @@ async function doSearch(force = true): Promise<void> {
     if (hit) {
       albums.value = hit
       albumSearched.value = true
-      openedAlbum.value = ''
+      closeAlbum()
       return
     }
   }
@@ -82,13 +91,13 @@ async function doSearch(force = true): Promise<void> {
       const found = (await api.invoke<NeAlbum[]>('ne:albumSearch', kw)) ?? []
       albums.value = found
       albumSearched.value = true
-      openedAlbum.value = ''
+      closeAlbum()
       cachePut(neAlbumCache, kw, found)
       return
     }
     albums.value = []
     albumSearched.value = false
-    openedAlbum.value = ''
+    closeAlbum()
     const tracks: any = await api.invoke('ne:search', kw)
     if (!Array.isArray(tracks)) {
       error.value = '搜索失败，请稍后重试'
@@ -107,7 +116,10 @@ async function openAlbum(id: number, title: string): Promise<void> {
   if (busy.value) return
   busy.value = '专辑加载中…'
   try {
-    const tracks: any = (await api.invoke('ne:albumSongs', id)) ?? []
+    // ne:albumSongs 自 0.7.0 起回 { tracks, album }（spec §5.2）：bundle 存进 openedAlbumBundle，
+    // Task 13 的「下载整张」要用它算专辑目录/CD 子目录/cue
+    const r: any = await api.invoke('ne:albumSongs', id)
+    const tracks: any = r?.tracks
     if (!Array.isArray(tracks) || tracks.length === 0) {
       error.value = '专辑为空或加载失败'
       return
@@ -115,6 +127,7 @@ async function openAlbum(id: number, title: string): Promise<void> {
     // 内联展示专辑歌曲（不再跳走；返回按钮回到专辑列表）
     store.setTracks(tracks, 'netease')
     openedAlbum.value = title
+    openedAlbumBundle.value = r?.album ?? null
   } finally {
     busy.value = ''
   }
@@ -123,7 +136,7 @@ async function openAlbum(id: number, title: string): Promise<void> {
 /** 歌曲 | 专辑 tab 切换：有关键词时自动按当前 tab 搜索（缓存命中零请求） */
 function switchSearchTab(t: 'song' | 'album'): void {
   searchTab.value = t
-  if (t === 'song') openedAlbum.value = ''
+  if (t === 'song') closeAlbum()
   if (!q.value.trim() || busy.value) return
   void doSearch(false)
 }
@@ -202,7 +215,7 @@ onUnmounted(() => {
     </template>
     <div v-else-if="searchTab === 'album'" class="grid">
       <div class="songs-head">
-        <button class="ghost" @click="openedAlbum = ''">‹ 返回专辑列表</button>
+        <button class="ghost" @click="closeAlbum()">‹ 返回专辑列表</button>
         <span class="songs-title">专辑 · {{ openedAlbum }}（{{ store.tracks.length }} 首）</span>
       </div>
       <TrackGrid

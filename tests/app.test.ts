@@ -877,3 +877,114 @@ describe('ne 会话探测单点缓存', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })
+
+// ---------- Task 8：专辑 IPC 返回 { tracks, album } ----------
+// 只测装配形状，不起本地下载 server（makeEnv 那套是给 runner 用的）：fetchImpl 按
+// 「URL + 请求体」片段路由，未登记的片段回空 body——两个 client 都把空 body 判成风控
+// 并立即上抛（不 sleep 退避），用例不会白等。
+describe('专辑 IPC 形状（0.7.0）', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true })
+  })
+  function albumApp(routes: Array<[string, string]>): App {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'album-ipc-'))
+    dirs.push(dir)
+    const f = vi.fn(async (input: any, init?: RequestInit) => {
+      const hay = `${String(input)} ${String(init?.body ?? '')}`
+      return new Response(routes.find(([frag]) => hay.includes(frag))?.[1] ?? '', { status: 200 })
+    }) as unknown as typeof fetch
+    return createApp({ userDataDir: dir, fetchImpl: f })
+  }
+
+  const QQ_ONE_TRACK = JSON.stringify({
+    code: 0,
+    data: {
+      name: 'A', singername: 'S', aDate: '2019-01-02', mid: 'm1', total_song_num: 21,
+      list: [{ songmid: 'S1', songname: 't1', albummid: 'm1', singer: [{ name: 'S' }], cdIdx: 1 }],
+    },
+  })
+
+  it('qqAlbumSongs 返回 { tracks, album }，album 带 totalTracks/discs', async () => {
+    const app = albumApp([['fcg_v8_album_info_cp', QQ_ONE_TRACK]])
+    const r: any = await app.qqAlbumSongs('m1')
+    expect(r.tracks).toHaveLength(1)
+    expect(r.album).toMatchObject({ source: 'qq', id: 'm1', totalTracks: 1, discs: [1] })
+    // 曲目级序号必须一起过 IPC：渲染侧把它原样带回 dl:enqueue，丢了整张专辑会全部命名成
+    // '01 曲名' 互相撞名（Task 10 才落盘，坏在这里看不出来）
+    expect(r.tracks[0]).toMatchObject({ trackNo: 1, disc: 1 })
+    // bundle 是纯数据才算过得去 index.ts 的 JSON 净化与 Electron 的结构化克隆：混入 Set/Map/函数时
+    // 净化会静默把整包变成 undefined（渲染侧只看到空专辑），这里同时验两条通路
+    expect(JSON.parse(JSON.stringify(r))).toEqual(r)
+    expect(structuredClone(r)).toEqual(r)
+  })
+
+  it('neAlbumSongs 同样返回 { tracks, album }', async () => {
+    const body = JSON.stringify({
+      code: 200,
+      album: { id: 7, name: 'A', artist: { name: 'S' }, publishTime: 1558310400000, picUrl: '' },
+      songs: [{ id: 1, name: 't', no: 1, cd: '01', ar: [{ name: 'S' }], al: { name: 'A' } }],
+    })
+    const app = albumApp([['/api/v1/album/', body]])
+    const r: any = await app.neAlbumSongs(7)
+    expect(r.tracks).toHaveLength(1)
+    expect(r.album).toMatchObject({ source: 'netease', id: '7', totalTracks: 1 })
+    expect(r.tracks[0]).toMatchObject({ trackNo: 1, disc: 1 })
+    expect(structuredClone(r)).toEqual(r)
+  })
+
+  it('链接导入专辑也带 album（可整张下载）', async () => {
+    const app = albumApp([['fcg_v8_album_info_cp', QQ_ONE_TRACK]])
+    const r: any = await app.fetchTracksByLink('https://y.qq.com/n/ryqq/albumDetail/001LVtAD0sEPKu')
+    expect(r.album).toMatchObject({ source: 'qq', id: 'm1', totalTracks: 1 })
+    expect(r.kind).toEqual({ kind: 'album', id: '001LVtAD0sEPKu' })
+  })
+
+  // 反锚：这条通道同时服务单曲/歌单/专辑三种链接，只有专辑分支改形状。
+  // 用 toStrictEqual（不是 toEqual）——它连「多出来的 undefined 键」也算差异，
+  // song/playlist 分支若被顺手塞进 album 键、或 album 分支的改动波及曲目映射，这里就红。
+  it('链接导入 song / playlist 分支返回形状与改动前逐键一致（不含 trackNo/disc/album）', async () => {
+    const detail = JSON.stringify({
+      info: { data: { track_info: {
+        mid: 'S1', title: '曲一', interval: 60, album: { mid: 'm1', name: 'A' },
+        singer: [{ name: 'S' }], file: { media_mid: 'P1' },
+      } } },
+    })
+    const songApp = albumApp([['get_song_detail_yqq', detail]])
+    expect(await songApp.fetchTracksByLink('https://y.qq.com/n/ryqq/songDetail/S1')).toStrictEqual({
+      kind: { kind: 'song', id: 'S1' },
+      tracks: [{
+        id: 'S1', name: '曲一', artist: 'S', album: 'A', cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000m1.jpg',
+        mediaMid: 'P1', duration: 60, vip: false,
+      }],
+    })
+
+    const cd = JSON.stringify({ cdlist: [{ songlist: [{ songmid: 'S1', songname: '曲一', albummid: 'm1', albumname: 'A', singer: [{ name: 'S' }], media_mid: 'P1' }] }] })
+    const plApp = albumApp([['fcg_ucc_getcdinfo_byids_cp', cd]])
+    expect(await plApp.fetchTracksByLink('https://y.qq.com/n/ryqq/playlist/123')).toStrictEqual({
+      kind: { kind: 'playlist', id: '123' },
+      tracks: [{
+        id: 'S1', name: '曲一', artist: 'S', album: 'A', cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000m1.jpg',
+        mediaMid: 'P1', vip: false,
+      }],
+    })
+  })
+
+  it('空/畸形专辑响应：tracks [] + bundle 走文档化回退，不抛（接线不得推翻 Task 6/7 的解析层）', async () => {
+    // 无名的畸形 body：回退名、单碟、0 首都得给出来——渲染侧靠 tracks.length 判「这张没歌」，
+    // 装配层若在这里抛或回 undefined，专辑页遮罩就变成白屏而不是「专辑为空」。
+    for (const body of ['{}', '{"code":0}', '{"data":{}}', '{"data":{"list":null}}']) {
+      const r: any = await albumApp([['fcg_v8_album_info_cp', body]]).qqAlbumSongs('m-x')
+      expect(r.tracks).toEqual([])
+      expect(r.album).toMatchObject({ source: 'qq', name: '未知专辑', artist: '未知歌手', totalTracks: 0, discs: [1] })
+    }
+    for (const body of ['{}', '{"code":200}', '{"album":{}}', '{"album":{"publishTime":null},"songs":null}']) {
+      const r: any = await albumApp([['/api/v1/album/', body]]).neAlbumSongs(9)
+      expect(r.tracks).toEqual([])
+      expect(r.album).toMatchObject({ source: 'netease', id: '9', name: '未知专辑', artist: '未知歌手', totalTracks: 0, discs: [1] })
+    }
+    // 有专辑名但零曲目：名字照留，只按实长算 0 首（Task 6/7 已定的口径，透传不得改成回退名）
+    const named: any = await albumApp([['fcg_v8_album_info_cp', '{"data":{"name":"空专辑","mid":"m-y"}}']]).qqAlbumSongs('m-y')
+    expect(named.album).toMatchObject({ id: 'm-y', name: '空专辑', totalTracks: 0 })
+  })
+})

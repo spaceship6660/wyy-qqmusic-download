@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from './qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchLyric, searchAlbums, describeTierSizes, availableTiers, TrackDTO, TrackDetail, Quality } from './qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbumInfo, fetchLyric, searchAlbums, describeTierSizes, availableTiers, TrackDTO, TrackDetail, Quality } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { getUserPlaylists, getFavPlaylists, getDissTracksPage } from './qqapi/playlists'
 import { getLoginUserInfo, isQqLoginExpired } from './qqapi/user'
@@ -11,7 +11,7 @@ import type { NeClient } from './neteaseapi/client'
 import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccountChecked, clearNeteaseTrackIdsCache } from './neteaseapi/tracks'
 import type { NeAccount } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
-import { neSearchAlbums, neAlbumSongs, nePlaylistPage } from './neteaseapi/tracks'
+import { neSearchAlbums, neAlbumInfo, nePlaylistPage } from './neteaseapi/tracks'
 import { neGetAudioUrl } from './neteaseapi/urls'
 import { cdnFallbackUrls } from './neteaseapi/cdn'
 import { createNeAuth, neLoggedInFromAccount } from './neteaseAuth'
@@ -22,6 +22,7 @@ import { tagFile } from './tagger'
 import type { TagMeta } from './tagger/types'
 import { decryptQmcFile } from './unlock/decrypt'
 import { safeName, uniquePath } from './fsUtils'
+import type { AlbumBundle, AlbumPage } from './albumBundle'
 import { loadSettings, saveSettings, Settings, isValidQuality, isValidLyricMode, isValidIdentity, clampConcurrency } from './settings'
 
 export interface AppDeps {
@@ -47,6 +48,13 @@ export interface UnlockJobResult {
   status: 'completed' | 'decrypted' | 'failed'
   outputPath?: string
   reason?: string
+}
+
+/** 专辑解析层的 AlbumPage（`{ bundle, tracks }`）→ IPC 载荷 `{ tracks, album }`（spec §5.2）。
+ *  字段名只在这里收口一次：三条通道（qq/ne 专辑页、链接导入）各拼一遍就会漂，而渲染侧两处持有
+ *  与 Task 13 的 dl:enqueue 回传都读 `album`——读不到就是「下载整张」入口静默消失。 */
+function albumPayload(p: AlbumPage): { tracks: TrackDTO[]; album: AlbumBundle } {
+  return { tracks: p.tracks, album: p.bundle }
 }
 
 export function createApp(deps: AppDeps) {
@@ -464,7 +472,9 @@ export function createApp(deps: AppDeps) {
   return {
     search: (q: string) => searchTracks(client, q),
     qqAlbumSearch: (q: string) => searchAlbums(client, q),
-    qqAlbumSongs: (mid: string) => fetchAlbum(client, mid),
+    // 0.7.0 破坏性形状变更：返回 { tracks, album }（spec §5.2，neAlbumSongs 同理）。渲染侧要持有批次
+    // 元数据才谈得上整张下载，只回数组等于把 Task 6/7 接出来的专辑级字段再丢一遍。
+    qqAlbumSongs: (mid: string) => fetchAlbumInfo(client, mid).then(albumPayload),
     // QQ 登录态歌单（2026-09-06 补全：我喜欢的音乐 + 创建/收藏歌单，点开批量下载）
     qqUserPlaylists: () => {
       const uin = auth.getStatus().uin?.replace(/^o/i, '') ?? ''
@@ -494,7 +504,8 @@ export function createApp(deps: AppDeps) {
       if (!kind) return null
       if (kind.kind === 'song') return { kind, tracks: [await getSingleTrack(client, kind.id)] }
       if (kind.kind === 'playlist') return { kind, tracks: await fetchPlaylist(client, kind.id) }
-      if (kind.kind === 'album') return { kind, tracks: await fetchAlbum(client, kind.id) }
+      // 三种链接里只有专辑带 album（单曲/歌单没有批次概念），渲染侧据此决定要不要给整张下载
+      if (kind.kind === 'album') return { kind, ...albumPayload(await fetchAlbumInfo(client, kind.id)) }
       return null
     },
     enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; lyricMode?: Settings['lyricMode']; source: 'qq' | 'netease' }) => {
@@ -593,7 +604,7 @@ export function createApp(deps: AppDeps) {
     },
     neSearch: (q: string) => neSearch(neClient, q),
     neAlbumSearch: (q: string) => neSearchAlbums(neClient, q),
-    neAlbumSongs: (id: number) => neAlbumSongs(neClient, id),
+    neAlbumSongs: (id: number) => neAlbumInfo(neClient, id).then(albumPayload),
     nePlaylistPage: (params: { id: string; offset: number; limit?: number }) =>
       nePlaylistPage(neClient, params.id, params.offset ?? 0, params.limit ?? 200),
     /** ne:account 与 neAuthStatus 读同一份 neAccountProbe 结论：一个窗口一次探测、一个结论，
