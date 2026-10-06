@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createApp } from '../src/main/app'
 import type { App } from '../src/main/app'
 import type { Quality, TrackDTO } from '../src/main/qqapi/tracks'
+import type { AlbumBundle } from '../src/main/albumBundle'
 import NodeID3 from 'node-id3'
 import { parseFile } from 'music-metadata'
 
@@ -986,5 +987,182 @@ describe('专辑 IPC 形状（0.7.0）', () => {
     // 有专辑名但零曲目：名字照留，只按实长算 0 首（Task 6/7 已定的口径，透传不得改成回退名）
     const named: any = await albumApp([['fcg_v8_album_info_cp', '{"data":{"name":"空专辑","mid":"m-y"}}']]).qqAlbumSongs('m-y')
     expect(named.album).toMatchObject({ id: 'm-y', name: '空专辑', totalTracks: 0 })
+  })
+})
+
+// ---------- Task 10：整张专辑落盘路径 ----------
+// 断言的是「目录 + 文件名」两段的最终字符串，不是「有没有落在某个子目录里」——
+// 平铺模式必须逐字符不变（下面有反锚用例），专辑模式则必须是 albumBundle 算出来的那一个目录
+// （Task 12 的 cover/cue 走同一个 albumTrackDir，这里若自己拼路径，cue 就会指向音频不在的目录）。
+describe('专辑落盘路径（0.7.0）', () => {
+  /** 专辑根目录名：albumDirName 的口径（歌手 - 专辑 (年)）在测试里独立写一遍，
+   *  不用被测函数验证被测函数。 */
+  const ROOT = 'S - A (2019)'
+
+  // bundle 用字面量而非 mkBundle：discs/totalTracks 是本用例要依赖的输入，写死才看得出改了哪。
+  function bundle(discs = 1, totalTracks = 2 * discs): AlbumBundle {
+    return {
+      source: 'qq', id: 'm1', name: 'A', artist: 'S', date: '2019-01-02',
+      company: 'C', coverUrl: '', totalTracks,
+      discs: Array.from({ length: discs }, (_, i) => i + 1),
+    }
+  }
+
+  function tracks(discs = 1): TrackDTO[] {
+    return [
+      { id: 'a1', name: 't1', artist: 'S', album: 'A', cover: '', trackNo: 1, disc: 1 },
+      { id: 'a2', name: 't2', artist: 'S', album: 'A', cover: '', trackNo: 2, disc: discs },
+    ]
+  }
+
+  const flatTrack = (): TrackDTO => ({ id: 'f1', name: 't1', artist: 'S', album: 'A', cover: '' })
+
+  it('job.album 存在 → 落 下载目录/歌手 - 专辑 (年)/NN 曲名.ext（单碟不建 CDnn 层）', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({ tracks: tracks(), quality: '320', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    expect(fs.readdirSync(path.join(env.dl, ROOT)).sort()).toEqual(['01 t1.mp3', '02 t2.mp3'])
+    // 专辑根下只有两个文件：单碟不得追加 CD01 层（discSegments 的规则），曲目也不得留在平铺根里
+    expect(fs.readdirSync(env.dl)).toEqual([ROOT])
+    expect(env.events.donePaths.every((p) => p.startsWith(path.join(env.dl, ROOT)))).toBe(true)
+  })
+
+  it('多碟 → 专辑根下每碟一个 CDnn 子目录（目录不存在时递归建出两层）', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({ tracks: tracks(2), quality: '320', source: 'qq', album: bundle(2) })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    // env.dl 在用例开始前并不存在（makeEnv 只写 settings.json），这里能列出来即证明递归创建；
+    // 专辑根下只有 CD01/CD02 两个目录，没有平铺的音频
+    expect(fs.readdirSync(path.join(env.dl, ROOT)).sort()).toEqual(['CD01', 'CD02'])
+    expect(fs.readdirSync(path.join(env.dl, ROOT, 'CD01'))).toEqual(['01 t1.mp3'])
+    expect(fs.readdirSync(path.join(env.dl, ROOT, 'CD02'))).toEqual(['02 t2.mp3'])
+    expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))).toEqual([])
+  })
+
+  it('反锚：不带 album 的入队目录/文件名与改动前逐字符一致，且不建任何子目录', async () => {
+    const env = await makeEnv({ lyricMode: 'lrc' })
+    env.app.enqueue({ tracks: [flatTrack()], quality: '320', source: 'qq' })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    // 平铺命名是「歌名 - 歌手」（现有实现如此，非「歌手 - 歌名」），这里锁整串而不是前缀
+    expect(fs.readdirSync(env.dl).sort()).toEqual(['t1 - S.lrc', 't1 - S.mp3'])
+    expect(env.events.donePaths).toEqual([path.join(env.dl, 't1 - S.mp3')])
+    expect(fs.existsSync(path.join(env.dl, ROOT))).toBe(false)
+  })
+
+  it('.lrc 侧车跟着音频进专辑目录并带 NN 前缀（lrcPath 由 dest 截断推出，最易掉回平铺根）', async () => {
+    const env = await makeEnv({ lyricMode: 'lrc' })
+    env.app.enqueue({ tracks: [tracks()[0]], quality: '320', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(fs.readFileSync(path.join(env.dl, ROOT, '01 t1.lrc'), 'utf-8')).toContain('LRC行')
+    // 反锚：侧车不得掉在下载目录根（现有 lrcPath 写法是 dest 去掉扩展名，改错一处才会暴露）
+    expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.lrc'))).toEqual([])
+    expect(fs.readdirSync(path.join(env.dl, ROOT)).sort()).toEqual(['01 t1.lrc', '01 t1.mp3'])
+  })
+
+  it('曲名含非法字符/超长仍经 safeName 得到合法文件名（专辑模式不得绕过现有清洗）', async () => {
+    const env = await makeEnv()
+    const long = 'x'.repeat(120)
+    env.app.enqueue({
+      tracks: [
+        { id: 'a1', name: 'a/b\\c:d*e?f"g<h>i|j', artist: 'S', album: 'A', cover: '', trackNo: 1, disc: 1 },
+        { id: 'a2', name: long, artist: 'S', album: 'A', cover: '', trackNo: 2, disc: 1 },
+      ],
+      quality: '320',
+      source: 'qq',
+      album: bundle(),
+    })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    const files = fs.readdirSync(path.join(env.dl, ROOT)).sort()
+    // 每个非法字符各换一个 '-'；超长名在「NN 前缀之外」的曲名部分截到 97+'...'（前缀不占额度）
+    expect(files).toEqual(['01 a-b-c-d-e-f-g-h-i-j.mp3', `02 ${'x'.repeat(97)}....mp3`])
+    expect(files.every((f) => !/[\\/:*?"<>|]/.test(f))).toBe(true)
+    expect(files[1].length).toBeLessThanOrEqual('02 '.length + 100 + '.mp3'.length)
+  })
+
+  it('同一专辑同一曲并发下载 → 专辑目录内 uniquePath 错开，两份产物都在（wx 占位在新目录下仍生效）', async () => {
+    const env = await makeEnv({ delayMs: 1200 })
+    const t = tracks()[0]
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq', album: bundle() })
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    expect(new Set(env.events.donePaths).size).toBe(2)
+    expect(fs.readdirSync(path.join(env.dl, ROOT)).sort()).toEqual(['01 t1(1).mp3', '01 t1.mp3'])
+    for (const p of env.events.donePaths) expect(fs.statSync(p).size).toBeGreaterThan(PAYLOAD.length)
+  })
+
+  it('直链失败重取换档（flac→mp3）：第二次占位仍在专辑目录内，扩展名换成新档，不留旧档空文件', async () => {
+    // 首解给 flac 档、该直链 404 → 重取给 320 档（mp3）。reserveDest 会在同一个 runDownloadJob
+    // 里被调用两次，若第二次退回 settings.downloadDir 就漏成平铺文件。
+    const env = await makeEnv({ purls: ['gone.flac', 'M800ok.mp3'] })
+    env.app.enqueue({ tracks: [tracks()[0]], quality: 'flac', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(fs.readdirSync(path.join(env.dl, ROOT))).toEqual(['01 t1.mp3']) // 只剩新档，flac 占位已清
+    expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3') || f.endsWith('.flac'))).toEqual([])
+    expect(env.events.doneFinalQuality).toEqual(['320'])
+  })
+
+  it('trackNo 缺失（非专辑来源被塞进专辑批次）→ 按 1 命名，不得产出 NaN 前缀', async () => {
+    const env = await makeEnv()
+    const t = tracks()[0]
+    delete (t as Partial<TrackDTO>).trackNo
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(path.join(env.dl, ROOT))).toEqual(['01 t1.mp3'])
+  })
+
+  it('曲目过百 → 序号位数取 trackPad(bundle)（三位），不是硬编码两位', async () => {
+    // 位数由 bundle.totalTracks 决定；写死 2 时字典序会在第 100 首中插到第 1 首前面
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: 'a57', name: 't57', artist: 'S', album: 'A', cover: '', trackNo: 57, disc: 1 }],
+      quality: '320',
+      source: 'qq',
+      album: bundle(1, 120),
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(path.join(env.dl, ROOT))).toEqual(['057 t57.mp3'])
+  })
+
+  it('disc 缺失 → 回落 bundle.discs[0]（多碟专辑不得凭空造出 CD02）', async () => {
+    const env = await makeEnv()
+    const t = tracks(2)[1]
+    delete (t as Partial<TrackDTO>).disc
+    env.app.enqueue({ tracks: [t], quality: '320', source: 'qq', album: bundle(2) })
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(path.join(env.dl, ROOT, 'CD01'))).toEqual(['02 t2.mp3'])
+    expect(fs.existsSync(path.join(env.dl, ROOT, 'CD02'))).toBe(false)
+  })
+
+  it('网易云专辑批次走同一条落盘路径（两源共用 runDownloadJob 骨架）', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: '123', name: 't1', artist: 'S', album: 'A', cover: '', trackNo: 1, disc: 1 }],
+      quality: '320',
+      source: 'netease',
+      album: { ...bundle(), source: 'netease' },
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(env.events.failed).toBe(0)
+    expect(fs.readdirSync(path.join(env.dl, ROOT))).toEqual(['01 t1.mp3'])
+  })
+
+  it('retryFailed 保留 album：重试成功的曲目回到专辑目录，不掉回平铺根', async () => {
+    // 同一直链前两次 403（初下 + 重取各一次）→ 任务失败；重试那次第三次请求放行 → 成功。
+    // jobSpecs 若没记 album，重跑的那首会落进下载目录根，整张专辑从此裂成两处。
+    const env = await makeEnv({ failFirst: { '/M800a1.mp3': 2 } })
+    env.app.enqueue({ tracks: [tracks()[0]], quality: '320', source: 'qq', album: bundle() })
+    await waitFor(() => env.events.failed >= 1)
+    const id = env.events.failedIds[0]
+    env.app.retryFailed(id)
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(path.join(env.dl, ROOT))).toEqual(['01 t1.mp3'])
+    expect(fs.readdirSync(env.dl).filter((f) => f.endsWith('.mp3'))).toEqual([])
   })
 })

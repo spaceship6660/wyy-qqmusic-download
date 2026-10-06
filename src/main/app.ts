@@ -23,6 +23,7 @@ import type { TagMeta } from './tagger/types'
 import { decryptQmcFile } from './unlock/decrypt'
 import { safeName, uniquePath } from './fsUtils'
 import type { AlbumBundle, AlbumPage } from './albumBundle'
+import { albumTrackDir, trackBaseName, trackPad } from './albumBundle'
 import { loadSettings, saveSettings, Settings, isValidQuality, isValidLyricMode, isValidIdentity, clampConcurrency } from './settings'
 
 export interface AppDeps {
@@ -107,6 +108,7 @@ export function createApp(deps: AppDeps) {
     quality: Settings['quality']
     lyricMode?: Settings['lyricMode']
     source: 'qq' | 'netease'
+    album?: AlbumBundle
   }>()
 
   // 诊断日志 appender（vkey 全档失败现场 / 收藏接口字段史；仅 keys 与有无标记，不记密钥与直链）
@@ -153,10 +155,20 @@ export function createApp(deps: AppDeps) {
     job.finalQuality = first.quality
     // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
     //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
-    const name = `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
-    fs.mkdirSync(settings.downloadDir, { recursive: true })
+    //    整张专辑模式：落 专辑根目录[/CDnn]/NN 曲名.ext；平铺模式：落 歌名 - 歌手.ext（行为一字不改）
+    //    目录算式只在 albumBundle.albumTrackDir 里有一份——Task 12 写 cover.jpg / album.cue 复用
+    //    同一个函数，这里再拼一遍就会漂成「cue 指向音频不在的目录」，且要到用户加载 cue 才暴露。
+    //    disc 回落 discs[0]（而非 1）：单曲没带碟号时，它属于这张专辑的第一碟。
+    const bundle = job.album
+    const dir = bundle
+      ? albumTrackDir(settings.downloadDir, bundle, job.track.disc ?? bundle.discs[0] ?? 1)
+      : settings.downloadDir
+    const name = bundle
+      ? trackBaseName(job.track, trackPad(bundle))
+      : `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
+    fs.mkdirSync(dir, { recursive: true })
     const reserveDest = (extension: string): string => {
-      let d = uniquePath(path.join(settings.downloadDir, `${name}.${extension}`))
+      let d = uniquePath(path.join(dir, `${name}.${extension}`))
       while (true) {
         try {
           fs.closeSync(fs.openSync(d, 'wx'))
@@ -508,9 +520,11 @@ export function createApp(deps: AppDeps) {
       if (kind.kind === 'album') return { kind, ...albumPayload(await fetchAlbumInfo(client, kind.id)) }
       return null
     },
-    enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; lyricMode?: Settings['lyricMode']; source: 'qq' | 'netease' }) => {
-      const { tracks, quality, lyricMode, source } = payload
+    enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; lyricMode?: Settings['lyricMode']; source: 'qq' | 'netease'; album?: AlbumBundle }) => {
+      const { tracks, quality, lyricMode, source, album } = payload
       // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
+      // album 整批共用一份：它决定落盘目录与 NN 命名，故也随 jobSpecs 登记，
+      // 否则重试那次没有它、这首歌掉回平铺根，一张专辑从此裂在两个目录里。
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
       const jobs: DownloadJob[] = []
@@ -518,9 +532,9 @@ export function createApp(deps: AppDeps) {
         if (seen.has(t.id)) continue
         seen.add(t.id)
         const id = `${source}:${t.id}:${++jobSeq}`
-        jobSpecs.set(id, { track: t, quality, lyricMode, source })
+        jobSpecs.set(id, { track: t, quality, lyricMode, source, album })
         jobs.push({
-          id, source, track: t, quality, lyricMode, state: 'queued' as const, progress: 0,
+          id, source, track: t, quality, lyricMode, album, state: 'queued' as const, progress: 0,
         })
       }
       // spec 登记上限 500（LRU 淘汰最旧；重启后清空，重试需重新勾选）
@@ -544,6 +558,7 @@ export function createApp(deps: AppDeps) {
         track: spec.track,
         quality: spec.quality,
         lyricMode: spec.lyricMode,
+        album: spec.album,
         state: 'queued' as const,
         progress: 0,
       }])
