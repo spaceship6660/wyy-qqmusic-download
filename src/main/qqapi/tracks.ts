@@ -11,6 +11,8 @@ export interface TrackDTO {
   cover: string
   mediaMid?: string
   duration?: number
+  trackNo?: number      // 专辑内曲目序号（1 起）；仅专辑来源填充
+  disc?: number         // 碟号（1 起）；仅专辑来源填充
   vip?: boolean
 }
 
