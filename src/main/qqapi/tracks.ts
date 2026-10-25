@@ -14,7 +14,8 @@ export interface TrackDTO {
   duration?: number
   trackNo?: number      // 专辑内曲目序号（1 起）；仅专辑来源填充
   disc?: number         // 碟号（1 起）；仅专辑来源填充
-  vip?: boolean
+  vip?: boolean         // 非会员听不了（播放受限）
+  vipQuality?: boolean  // 免费可听，但高音质/下载需会员或单独购买
 }
 
 export interface TrackDetail {
@@ -41,21 +42,22 @@ function artistOf(s: any): string {
   return arr.map((x: any) => x?.name ?? '').filter(Boolean).join(' / ') || '未知歌手'
 }
 
-/** VIP/付费曲判定：
- * - 主依据 `pay.pay_down` > 0（下载需付费/会员）。歌单、我喜欢（CgiGetDiss）、搜索条目都带完整
- *   pay 对象，2026-09-27 实测确认；
- * - 次依据仅取 song detail 的 `flags.try_begin`（与改动前一致）。
+/** 会员/付费属性（决定卡片角标），两个维度互斥：
+ * - `vip`：「非会员听不了」。主依据 `pay.pay_play`（旧式 fcg 接口同名小写 `payplay`）> 0，
+ *   次依据 `flags.try_begin`（song detail 的仅试听标记）；
+ * - `vipQuality`：「免费能听，高音质/下载需会员或购买」。依据 `pay.pay_down`（fcg 接口 `paydownload`）> 0。
+ *
+ * **不要用 `pay_down` 判 `vip`**：它只表示下载收费，这类歌在线播放是免费的。
+ * 2026-10-25 实测 CgiGetDiss 20 曲样本中 9 首 `pay_play=0 && pay_down=1`。
  *
  * **不要用 `file.try_begin`**：免费曲也会带它（实测《我无法用我的语言》pay 全 0、只登记 128k/m4a，
- * 却有 file.try_begin=95604），拿它判 VIP 会把免费曲误报成会员歌。
- *
- * 此前仅 getTrackDetail/getSingleTrack 映射 vip 且只认 flags.try_begin —— 歌单/搜索来源的条目
- * vip 恒缺，既漏掉 VIP 角标，也让「下载失败点名会员」在歌单来源下永远触发不了。 */
-export function isVipEntry(e: any): boolean {
-  const payDown = Number(e?.pay?.pay_down ?? 0)
-  if (Number.isFinite(payDown) && payDown > 0) return true
+ * 却有 file.try_begin=95604），拿它判 VIP 会把免费曲误报成会员歌。 */
+export function vipFlagsOf(e: any): { vip: boolean; vipQuality: boolean } {
+  const payPlay = Number(e?.pay?.pay_play ?? e?.pay?.payplay ?? 0)
   const flagsTry = Number(e?.flags?.try_begin ?? 0)
-  return Number.isFinite(flagsTry) && flagsTry > 0
+  const vip = (Number.isFinite(payPlay) && payPlay > 0) || (Number.isFinite(flagsTry) && flagsTry > 0)
+  const payDown = Number(e?.pay?.pay_down ?? e?.pay?.paydownload ?? 0)
+  return { vip, vipQuality: !vip && Number.isFinite(payDown) && payDown > 0 }
 }
 
 /** 该曲实际登记的可下载档位（体积 > 0），按降级链顺序（高→低）。
@@ -92,7 +94,7 @@ export async function searchTracks(client: QqClient, query: string, opts: { limi
     cover: qqCoverUrl(s),
     mediaMid: s?.file?.media_mid,
     duration: typeof s?.interval === 'number' ? s.interval : undefined,
-    vip: isVipEntry(s),
+    ...vipFlagsOf(s),
   }))
 }
 
@@ -148,7 +150,7 @@ export async function getTrackDetail(client: QqClient, mid: string): Promise<Tra
   return {
     mediaMid: file.media_mid ?? mid,
     date: typeof t === 'string' ? t : '',
-    vip: isVipEntry(info),
+    vip: vipFlagsOf(info).vip,
     sizes: {
       flac: file.size_flac, ape: file.size_ape,
       mp3_320: file.size_320mp3, mp3_128: file.size_128mp3,
@@ -201,7 +203,7 @@ export async function getSingleTrack(client: QqClient, mid: string): Promise<Tra
     cover: albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albummid}.jpg` : '',
     mediaMid: (info?.file?.media_mid ?? info.mid) as string,
     duration: typeof info?.interval === 'number' ? info.interval : undefined,
-    vip: isVipEntry(info),
+    ...vipFlagsOf(info),
   }
 }
 
@@ -220,7 +222,7 @@ function trackFromEntry(e: any, albumDefault = ''): TrackDTO {
     album: e?.albumname ?? albumDefault ?? '',
     cover: e?.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${e.albummid}.jpg` : '',
     mediaMid: e?.media_mid ?? e?.file?.media_mid,
-    vip: isVipEntry(e),
+    ...vipFlagsOf(e),
   }
 }
 
@@ -234,7 +236,7 @@ export async function fetchPlaylist(client: QqClient, id: string): Promise<Track
 /** 专辑详情（含专辑级元数据 + 每曲序号/碟号）。
  *  ⚠️ URL 的 .fcg 后缀是必需的：去掉得 HTTP 404 空 body，client.get 会把它报成
  *  「rate-limited: 空响应（风控）」——排查 QQ 专辑问题时先看这条文案有没有骗人（2026-10-06 踩过）。
- *  曲目映射复用同文件已有的 trackFromEntry（含经过测试的 isVipEntry 判据），不另写一份。 */
+ *  曲目映射复用同文件已有的 trackFromEntry（含经过测试的 vipFlagsOf 判据），不另写一份。 */
 export async function fetchAlbumInfo(client: QqClient, mid: string): Promise<AlbumPage> {
   const text = await client.get(`https://i.y.qq.com/v8/fcg-bin/fcg_v8_album_info_cp.fcg?albummid=${mid}&format=json`)
   const json = JSON.parse(stripJsonp(text))

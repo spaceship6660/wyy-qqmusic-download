@@ -393,7 +393,7 @@ export function createApp(deps: AppDeps) {
         } catch {
           // 详情取不到：不带附加信息
         }
-        if (job.track.vip) {
+        if (job.track.vip || job.track.vipQuality) {
           return new Error(`付费/会员歌曲下载不了：当前账号无该曲下载权限（需 QQ 音乐绿钻/豪华绿钻或单独购买）${detailNote}`)
         }
         return new Error(
@@ -460,7 +460,7 @@ export function createApp(deps: AppDeps) {
     // 注意 Number('')===0：空串/空白必须拒掉，不能当合法 id=0 去请求
     if (!Number.isInteger(id) || id <= 0) throw new Error(`非法的网易云歌曲 ID: ${job.track.id}`)
     const vipify = (e: unknown): unknown => {
-      if (job.track.vip && e instanceof Error && /未拿到可播放/.test(e.message)) {
+      if ((job.track.vip || job.track.vipQuality) && e instanceof Error && /未拿到可播放/.test(e.message)) {
         return new Error('付费/会员歌曲下载不了：当前账号无该曲权限（需网易云会员或单独购买）')
       }
       return e

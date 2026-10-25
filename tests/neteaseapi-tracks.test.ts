@@ -33,13 +33,20 @@ const rawSong = {
 }
 
 describe('neteaseTrackToDto', () => {
-  it('映射为 TrackDTO（String(id)、多歌手合并、封面、vip=fee>0）', () => {
+  it('映射为 TrackDTO（String(id)、多歌手合并、封面、vip=fee===1）', () => {
     const dto = neteaseTrackToDto({ ...rawSong, ar: [{ name: 'A' }, { name: 'B' }], fee: 1 })
     expect(dto.id).toBe('103027')
     expect(dto.artist).toBe('A / B')
     expect(dto.cover).toBe('https://p1.music.126.net/x.jpg')
     expect(dto.vip).toBe(true)
     expect(dto.name).toContain('天空之城')
+  })
+  it('fee=8（免费可听、高音质需会员）只挂 vipQuality；fee=4（购买专辑）不挂标', () => {
+    // 回归锚：2026-10-25 实测 fee=8 匿名可取 320k 直链，旧判据 fee>0 把它标成 VIP
+    expect(neteaseTrackToDto({ ...rawSong, fee: 8 })).toMatchObject({ vip: false, vipQuality: true })
+    expect(neteaseTrackToDto({ ...rawSong, fee: 4 })).toMatchObject({ vip: false, vipQuality: false })
+    expect(neteaseTrackToDto({ ...rawSong, fee: 1 })).toMatchObject({ vip: true, vipQuality: false })
+    expect(neteaseTrackToDto({ ...rawSong, fee: 0 })).toMatchObject({ vip: false, vipQuality: false })
   })
   it('兼容 song/detail 形状（artists/album/duration）：歌单分页不再未知歌手/无封面', () => {
     // 2026-09-06 真实接口实锤：/api/song/detail 返回 artists + album，无 ar/al
@@ -266,7 +273,7 @@ describe('neAlbumInfo（0.7.0 专辑封装）', () => {
     const r = await neAlbumInfo(mockNeClient(() => new Response(neAlbumResponse({ songs }), { status: 200 })), 1)
     expect(r.tracks[0]).toEqual({
       id: '5', name: 'A', artist: 'X / Y', album: 'AL', cover: 'http://c/1.jpg',
-      duration: 269, vip: false, trackNo: 3, disc: 2,
+      duration: 269, vip: false, vipQuality: false, trackNo: 3, disc: 2,
     })
   })
 

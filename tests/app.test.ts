@@ -599,14 +599,15 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     env.app.enqueue({
       tracks: [
         { id: '201', name: '会员歌', artist: '手', album: '', cover: '', vip: true },
+        { id: '203', name: '高音质会员歌', artist: '手', album: '', cover: '', vipQuality: true },
         { id: '202', name: '普通歌', artist: '手', album: '', cover: '' },
       ],
       quality: '320',
       source: 'netease',
     })
-    await waitFor(() => env.events.failed >= 2)
-    expect(env.events.failedErrors.length).toBe(2)
-    expect(env.events.failedErrors.some((m) => /会员|付费/.test(m))).toBe(true)
+    await waitFor(() => env.events.failed >= 3)
+    expect(env.events.failedErrors.length).toBe(3)
+    expect(env.events.failedErrors.filter((m) => /会员|付费/.test(m)).length).toBe(2)
     expect(env.events.failedErrors.some((m) => /会员|付费/.test(m) === false && /未拿到可播放/.test(m))).toBe(true)
   })
 
@@ -641,13 +642,17 @@ describe('createApp runner 装配（T10 评审修复）', () => {
     const env = await makeEnv({ deadVkey: true })
     expect(env.app.authImportCookie('uin=o123; qqmusic_uin=o123; qm_keyst=q; qqmusic_key=k')).toBe(true)
     env.app.enqueue({
-      tracks: [{ ...track('q7', '会员歌'), vip: true }, track('q6', '普通歌')],
+      tracks: [
+        { ...track('q7', '会员歌'), vip: true },
+        { ...track('q5', '高音质会员歌'), vipQuality: true },
+        track('q6', '普通歌'),
+      ],
       quality: 'flac',
       source: 'qq',
     })
-    await waitFor(() => env.events.failed >= 2)
-    expect(env.events.failedErrors.length).toBe(2)
-    expect(env.events.failedErrors.some((m) => /会员|付费/.test(m))).toBe(true)
+    await waitFor(() => env.events.failed >= 3)
+    expect(env.events.failedErrors.length).toBe(3)
+    expect(env.events.failedErrors.filter((m) => /会员|付费/.test(m)).length).toBe(2)
     expect(env.events.failedErrors.some((m) => !/会员|付费/.test(m) && /未拿到可播放/.test(m))).toBe(true)
   })
 
@@ -992,7 +997,7 @@ describe('专辑 IPC 形状（0.7.0）', () => {
       kind: { kind: 'song', id: 'S1' },
       tracks: [{
         id: 'S1', name: '曲一', artist: 'S', album: 'A', cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000m1.jpg',
-        mediaMid: 'P1', duration: 60, vip: false,
+        mediaMid: 'P1', duration: 60, vip: false, vipQuality: false,
       }],
     })
 
@@ -1002,7 +1007,7 @@ describe('专辑 IPC 形状（0.7.0）', () => {
       kind: { kind: 'playlist', id: '123' },
       tracks: [{
         id: 'S1', name: '曲一', artist: 'S', album: 'A', cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000m1.jpg',
-        mediaMid: 'P1', vip: false,
+        mediaMid: 'P1', vip: false, vipQuality: false,
       }],
     })
   })

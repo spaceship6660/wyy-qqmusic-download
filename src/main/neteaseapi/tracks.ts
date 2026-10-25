@@ -29,7 +29,11 @@ export function neteaseTrackToDto(s: any): TrackDTO {
     album: al?.name ?? '',
     cover: al?.picUrl ?? '',
     duration: typeof ms === 'number' ? Math.round(ms / 1000) : undefined,
-    vip: (s?.fee ?? 0) > 0,
+    // fee：0 免费 / 1 仅会员 / 4 需购买专辑 / 8 免费可听（会员才给高音质与下载）。
+    // 两个角标互斥：vip=非会员听不了，vipQuality=能听但高音质/下载需会员。
+    // 2026-10-25 实测：fee=8 匿名可取 320k 直链，fee=1 匿名 url=null。
+    vip: s?.fee === 1,
+    vipQuality: s?.fee === 8,
   }
 }
 

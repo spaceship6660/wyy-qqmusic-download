@@ -4,7 +4,7 @@
 // - 我喜欢的音乐（dirid=201）/ 歌单歌曲：music.srfDissInfo.DissInfo / CgiGetDiss（data.songlist）
 // 均需登录态（client.setAuth 注入 cookie）；euin = 登录响应 EncryptUin（auth 持久化）。
 import type { QqClient } from './client'
-import { qqCoverUrl, isVipEntry, type TrackDTO } from './tracks'
+import { qqCoverUrl, vipFlagsOf, type TrackDTO } from './tracks'
 
 export interface QqPlaylistDTO {
   id: string
@@ -25,7 +25,7 @@ export function dissSongToTrack(s: any) {
     cover: qqCoverUrl({ album: s?.album }),
     mediaMid: s?.file?.media_mid,
     duration: typeof s?.interval === 'number' ? s.interval : undefined,
-    vip: isVipEntry(s),
+    ...vipFlagsOf(s),
   }
 }
 

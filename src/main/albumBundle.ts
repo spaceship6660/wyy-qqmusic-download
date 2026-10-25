@@ -4,7 +4,7 @@ import type { TrackDTO } from './qqapi/tracks'
 
 /** 一张专辑的批次上下文：随 DownloadJob 传递、渲染侧原样回传，所以必须是纯数据（可结构化克隆）。
  *  本模块只描述「一张专辑」在落盘层面需要什么，不解析两源原始 JSON——曲目映射沿用各自 api 模块里
- *  已经有测试的实现（trackFromEntry / neteaseTrackToDto / isVipEntry），在这里重写等于复制 VIP 判据，
+ *  已经有测试的实现（trackFromEntry / neteaseTrackToDto / vipFlagsOf），在这里重写等于复制 VIP 判据，
  *  还会造成 albumBundle ↔ qqapi/tracks 的循环 import（这里只 import 它的类型）。 */
 export interface AlbumBundle {
   source: 'qq' | 'netease'

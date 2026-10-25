@@ -6,7 +6,7 @@ import type { Quality } from '../qualityOptions'
 
 export interface UiTrack {
   id: string; name: string; artist: string; album: string; cover: string
-  mediaMid?: string; duration?: number; vip?: boolean
+  mediaMid?: string; duration?: number; vip?: boolean; vipQuality?: boolean
   // 专辑内序号与碟号：仅专辑来源填充。入队时 tracks 原样回传主进程，这里少声明一个字段整张专辑
   // 就会落盘成 N 个 '01 曲名' 互相撞名。字段集与主进程 TrackDTO 的同集关系由 renderer-store 测试把守。
   trackNo?: number; disc?: number

@@ -45,7 +45,8 @@ function durText(sec?: number): string {
         <div class="cover-wrap">
           <img v-if="t.cover" class="cover" :src="t.cover" loading="lazy" alt="" />
           <div v-else class="cover cover-placeholder">♫</div>
-          <span v-if="t.vip" class="vip-badge" title="VIP 歌曲（可能降级下载）">VIP</span>
+          <span v-if="t.vip" class="vip-badge" title="会员专属：非会员无法播放">VIP</span>
+          <span v-else-if="t.vipQuality" class="vipq-badge" title="免费可听；高音质与下载需会员或单独购买">VIP高音质</span>
           <span class="check" :class="{ on: selectedIds.has(t.id) }">{{ selectedIds.has(t.id) ? '✓' : '' }}</span>
         </div>
         <div class="info">
@@ -107,6 +108,14 @@ function durText(sec?: number): string {
   padding: 1px 6px;
   font-size: 11px; font-weight: 700; color: #fff;
   background: linear-gradient(90deg, #e8a13a, #d37a12);
+  border-radius: 4px;
+}
+.vipq-badge {
+  position: absolute; top: 6px; left: 6px;
+  padding: 1px 6px;
+  font-size: 11px; font-weight: 700; color: #b26a00;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e8a13a;
   border-radius: 4px;
 }
 .check {

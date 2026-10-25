@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createQqClient } from '../src/main/qqapi/client'
-import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchAlbumInfo, stripJsonp, qqCoverUrl, searchAlbums, isVipEntry, describeTierSizes } from '../src/main/qqapi/tracks'
+import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbum, fetchAlbumInfo, stripJsonp, qqCoverUrl, searchAlbums, vipFlagsOf, describeTierSizes } from '../src/main/qqapi/tracks'
 
 const fx = (name: string) => fs.readFileSync(path.join(__dirname, 'fixtures', 'qqapi', name), 'utf-8')
 
@@ -34,34 +34,47 @@ describe('搜索', () => {
     expect(t.artist).toBeTypeOf('string')
     expect(t.cover).toContain('http')
     expect(tracks[1].artist).toBe('南征北战NZBZ / 白勺啊白')
-    expect(tracks[0].vip).toBe(false) // fixture 无 try_begin / pay.pay_down → 非 VIP
+    expect(tracks[0].vip).toBe(false) // fixture 无 try_begin / pay.pay_play → 非 VIP
     expect(tracks[0].duration).toBeTypeOf('number')
     expect(tracks[3].artist).toBe('未知歌手')
   })
 })
 
-describe('VIP/付费判定（isVipEntry）', () => {
-  it('pay.pay_down>0 判 VIP（歌单/我喜欢条目的主要依据）', () => {
-    // 2026-09-27 实测：CgiGetDiss 的 songlist 条目带完整 pay 对象
-    expect(isVipEntry({ pay: { pay_down: 1, pay_month: 1, price_track: 0 } })).toBe(true)
-    expect(isVipEntry({ pay: { pay_down: 0, pay_month: 0 } })).toBe(false)
+describe('VIP/付费判定（vipFlagsOf）', () => {
+  it('pay.pay_play>0 → vip（非会员听不了；旧式 fcg 接口小写 payplay 同认）', () => {
+    // 2026-10-25 实测：CgiGetDiss 条目 pay 为 snake_case，fcg_ucc 歌单条目为全小写
+    expect(vipFlagsOf({ pay: { pay_play: 1, pay_down: 1, pay_month: 1, price_track: 200 } }))
+      .toEqual({ vip: true, vipQuality: false })
+    expect(vipFlagsOf({ pay: { payplay: 1, paydownload: 1, paytrackmouth: 1, paytrackprice: 200 } }))
+      .toEqual({ vip: true, vipQuality: false })
+    expect(vipFlagsOf({ pay: { pay_play: 0, pay_month: 0 } })).toEqual({ vip: false, vipQuality: false })
   })
 
-  it('song detail 的 flags.try_begin>0 判 VIP', () => {
-    expect(isVipEntry({ flags: { try_begin: 1 } })).toBe(true)
-    expect(isVipEntry({ flags: { try_begin: 0 } })).toBe(false)
+  it('pay_down>0 但 pay_play=0 → 只挂 vipQuality（免费能听，高音质/下载需会员）', () => {
+    // 回归锚：2026-10-25 实测《ルルージュ》pay_play=0 / pay_down=1，旧判据把整页都标成了 VIP
+    expect(vipFlagsOf({ pay: { pay_play: 0, pay_down: 1, pay_month: 1 } }))
+      .toEqual({ vip: false, vipQuality: true })
+    expect(vipFlagsOf({ pay: { payplay: 0, paydownload: 1 } }))
+      .toEqual({ vip: false, vipQuality: true })
+  })
+
+  it('song detail 的 flags.try_begin>0 → vip', () => {
+    expect(vipFlagsOf({ flags: { try_begin: 1 } })).toEqual({ vip: true, vipQuality: false })
+    expect(vipFlagsOf({ flags: { try_begin: 0 } })).toEqual({ vip: false, vipQuality: false })
   })
 
   it('file.try_begin 不参与判定（免费曲也带它 → 曾会把免费曲误报成会员歌）', () => {
     // 回归锚：实测《我无法用我的语言》pay 全 0、只登记 128k/m4a，却带 file.try_begin=95604
-    expect(isVipEntry({ file: { try_begin: 95604 }, pay: { pay_down: 0 } })).toBe(false)
+    expect(vipFlagsOf({ file: { try_begin: 95604 }, pay: { pay_play: 0 } }))
+      .toEqual({ vip: false, vipQuality: false })
   })
 
   it('字段缺失/非法一律 false（不误报）', () => {
-    expect(isVipEntry({})).toBe(false)
-    expect(isVipEntry(undefined)).toBe(false)
-    expect(isVipEntry({ file: {}, pay: {} })).toBe(false)
-    expect(isVipEntry({ flags: { try_begin: 'x' } })).toBe(false)
+    const none = { vip: false, vipQuality: false }
+    expect(vipFlagsOf({})).toEqual(none)
+    expect(vipFlagsOf(undefined)).toEqual(none)
+    expect(vipFlagsOf({ file: {}, pay: {} })).toEqual(none)
+    expect(vipFlagsOf({ flags: { try_begin: 'x' } })).toEqual(none)
   })
 })
 
@@ -257,15 +270,16 @@ describe('fetchAlbumInfo（0.7.0 专辑封装）', () => {
     expect(r.tracks.map((x) => x.trackNo)).toEqual([1, 2, 3])
   })
 
-  it('VIP 判定复用 isVipEntry：pay.pay_down>0 即 vip，file.try_begin 仍不参与', async () => {
+  it('VIP 判定复用 vipFlagsOf：pay.pay_play>0 即 vip，只收下载费 → vipQuality，file.try_begin 仍不参与', async () => {
     // 回归锚：专辑解析若自己写一份判据（常见错误是拿 file.try_begin 判），免费曲会被打成会员歌
     const raw = JSON.stringify({ data: { name: 'A', mid: '002m', list: [
-      { songmid: 'S1', albummid: '002m', pay: { pay_down: 1, pay_month: 1 } },
-      { songmid: 'S2', albummid: '002m', pay: { pay_down: 0 }, file: { try_begin: 95604 } },
+      { songmid: 'S1', albummid: '002m', pay: { pay_play: 1, pay_month: 1 } },
+      { songmid: 'S2', albummid: '002m', pay: { pay_play: 0, pay_down: 1 }, file: { try_begin: 95604 } },
       { songmid: 'S3', albummid: '002m', flags: { try_begin: 1 } },
     ] } })
     const r = await fetchAlbumInfo(mockAlbumClient(() => raw), '002m')
     expect(r.tracks.map((x) => x.vip)).toEqual([true, false, true])
+    expect(r.tracks.map((x) => x.vipQuality)).toEqual([false, true, false])
   })
 
   it('曲目映射逐字段仍由 trackFromEntry 产出（spread 只加 trackNo/disc，不改写既有字段）', async () => {
@@ -285,6 +299,7 @@ describe('fetchAlbumInfo（0.7.0 专辑封装）', () => {
       cover: 'https://y.gtimg.cn/music/photo_new/T002R300x300M000002xyz.jpg',
       mediaMid: 'MM1',
       vip: false,
+      vipQuality: false,
       trackNo: 1,
       disc: 1,
     })
