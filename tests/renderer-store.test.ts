@@ -37,6 +37,59 @@ describe('download store', () => {
     expect(s.quality).toBe('flac')
   })
 
+  it('Shift+点击连选：按列表顺序（从左到右、从上到下）选中锚点到目标之间的全部曲目', () => {
+    const s = useDownloadStore()
+    s.setTracks(['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, name: id, artist: '', album: '', cover: '' })))
+    s.toggle('b')            // 普通点击：锚点 = b，选中 b
+    s.toggle('d', true)      // Shift+点击尾：b..d
+    expect([...s.selectedIds].sort()).toEqual(['b', 'c', 'd'])
+  })
+
+  it('Shift+点击反向连选同样成立，且只加不减（锚点不动，连续 Shift 可延伸）', () => {
+    const s = useDownloadStore()
+    s.setTracks(['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, name: id, artist: '', album: '', cover: '' })))
+    s.toggle('d')            // 锚点 = d
+    s.toggle('b', true)      // 反向：b..d
+    expect([...s.selectedIds].sort()).toEqual(['b', 'c', 'd'])
+    s.toggle('a', true)      // 锚点仍是 d → a..d，不取消 b/c
+    expect([...s.selectedIds].sort()).toEqual(['a', 'b', 'c', 'd'])
+    s.toggle('e', true)      // 锚点仍是 d → a..d ∪ d..e = a..e
+    expect([...s.selectedIds].sort()).toEqual(['a', 'b', 'c', 'd', 'e'])
+  })
+
+  it('无锚点时 Shift+点击退化为普通点击；普通点击会移动锚点', () => {
+    const s = useDownloadStore()
+    s.setTracks(['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, name: id, artist: '', album: '', cover: '' })))
+    s.toggle('c', true)      // 没有锚点 → 只选 c
+    expect([...s.selectedIds]).toEqual(['c'])
+    s.toggle('e')            // 普通点击：选中 e，锚点移到 e
+    expect([...s.selectedIds].sort()).toEqual(['c', 'e'])
+    s.toggle('d', true)      // 锚点 e → d..e
+    expect([...s.selectedIds].sort()).toEqual(['c', 'd', 'e'])
+  })
+
+  it('全选 / 清空 / 换列表都会重置锚点（Shift 不再跨批次连选）', () => {
+    const s = useDownloadStore()
+    const list = ['a', 'b', 'c'].map((id) => ({ id, name: id, artist: '', album: '', cover: '' }))
+    s.setTracks(list)
+    s.toggle('a')
+    s.clear()
+    s.toggle('c', true)      // 锚点已被 clear 重置 → 只选 c
+    expect([...s.selectedIds]).toEqual(['c'])
+
+    s.toggle('a')            // 锚点 = a
+    s.selectAll()
+    expect(s.selectedIds.size).toBe(3)
+    s.clear()
+    s.toggle('c', true)
+    expect([...s.selectedIds]).toEqual(['c'])
+
+    s.toggle('a')            // 锚点 = a
+    s.setTracks(list)        // 换列表（selectedIds/锚点一起重置）
+    s.toggle('c', true)
+    expect([...s.selectedIds]).toEqual(['c'])
+  })
+
   it('专辑曲目经 store 原样回传：trackNo/disc 不在渲染侧丢掉', () => {
     // 勾选/整张入队时 tracks 要从这里原样回给 dl:enqueue；UiTrack 少声明字段的话这个字面量在 tsc
     // 就编译不过（丢字段的产物是 N 个 '01 曲名' 撞名，Task 10 才看得见）。

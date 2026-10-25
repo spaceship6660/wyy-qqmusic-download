@@ -1015,7 +1015,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           :load-more="!!songsView.cursor"
           :load-more-total="songsView.total"
           :loading-more="loadingMore"
-          @toggle="store.toggle($event)"
+          @toggle="store.toggle"
           @load-more="loadMoreSongs"
         />
       </section>
@@ -1032,7 +1032,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           v-if="searchTab === 'song' && store.trackSource !== 'netease'"
           :tracks="store.tracks"
           :selected-ids="store.selectedIds"
-          @toggle="store.toggle($event)"
+          @toggle="store.toggle"
           @select-all="store.selectAll()"
           @clear="store.clear()"
         />

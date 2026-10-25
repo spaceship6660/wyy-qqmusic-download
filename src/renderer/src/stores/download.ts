@@ -74,6 +74,9 @@ export const useDownloadStore = defineStore('download', {
     /** 当前 tracks 的来源（QQ/网易云内联列表互斥显示，防止拿错源下载） */
     trackSource: '' as '' | 'qq' | 'netease',
     selectedIds: new Set<string>(),
+    /** Shift 连选锚点：最后一次普通点击的曲目 id。Shift+点击时按 tracks 顺序（= 卡片从左到右、
+     *  从上到下的视觉顺序）选中锚点到目标之间的全部曲目；换列表/全选/清空时重置。 */
+    selectedAnchor: '' as string,
     /** 网易云页选中（与 QQ 页分离；底部固定工具栏共用） */
     neSelectedIds: new Set<string>(),
     quality: '320' as UiQuality,
@@ -87,16 +90,36 @@ export const useDownloadStore = defineStore('download', {
     setTracks(t: UiTrack[], source?: 'qq' | 'netease') {
       this.tracks = t
       this.selectedIds = new Set()
+      this.selectedAnchor = ''
       if (source) this.trackSource = source
     },
     /** 懒加载：追加下一批歌曲（保留现有选中） */
     appendTracks(t: UiTrack[]) { this.tracks = [...this.tracks, ...t] },
-    toggle(id: string) {
+    /** shift=true 且存在锚点：区间连选（只加不减，锚点不动，便于连续 Shift 点击调整尾端）；
+     *  否则按普通点击切换，并把锚点移到该曲。 */
+    toggle(id: string, shift = false) {
+      if (shift && this.selectedAnchor) {
+        const from = this.tracks.findIndex((t) => t.id === this.selectedAnchor)
+        const to = this.tracks.findIndex((t) => t.id === id)
+        if (from >= 0 && to >= 0) {
+          const lo = Math.min(from, to)
+          const hi = Math.max(from, to)
+          for (let i = lo; i <= hi; i++) this.selectedIds.add(this.tracks[i].id)
+          return
+        }
+      }
       if (this.selectedIds.has(id)) this.selectedIds.delete(id)
       else this.selectedIds.add(id)
+      this.selectedAnchor = id
     },
-    selectAll() { this.selectedIds = new Set(this.tracks.map((t) => t.id)) },
-    clear() { this.selectedIds = new Set() },
+    selectAll() {
+      this.selectedIds = new Set(this.tracks.map((t) => t.id))
+      this.selectedAnchor = ''
+    },
+    clear() {
+      this.selectedIds = new Set()
+      this.selectedAnchor = ''
+    },
     neToggle(id: string) {
       if (this.neSelectedIds.has(id)) this.neSelectedIds.delete(id)
       else this.neSelectedIds.add(id)

@@ -267,7 +267,7 @@ onUnmounted(() => {
       <TrackGrid
         :tracks="store.tracks"
         :selected-ids="store.selectedIds"
-        @toggle="store.toggle($event)"
+        @toggle="store.toggle"
         @select-all="store.selectAll()"
         @clear="store.clear()"
       />
@@ -277,7 +277,7 @@ onUnmounted(() => {
         v-if="store.trackSource !== 'qq'"
         :tracks="store.tracks"
         :selected-ids="store.selectedIds"
-        @toggle="store.toggle($event)"
+        @toggle="store.toggle"
         @select-all="store.selectAll()"
         @clear="store.clear()"
       />

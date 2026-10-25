@@ -10,7 +10,8 @@ defineProps<{
   loadingMore?: boolean
 }>()
 const emit = defineEmits<{
-  toggle: [id: string]
+  /** shift=true：Windows 风格的 Shift+点击连选（由 store 按 tracks 数组顺序取区间） */
+  toggle: [id: string, shift: boolean]
   selectAll: []
   clear: []
   loadMore: []
@@ -40,7 +41,7 @@ function durText(sec?: number): string {
         :key="t.id"
         class="card"
         :class="{ checked: selectedIds.has(t.id) }"
-        @click="emit('toggle', t.id)"
+        @click="emit('toggle', t.id, $event.shiftKey)"
       >
         <div class="cover-wrap">
           <img v-if="t.cover" class="cover" :src="t.cover" loading="lazy" alt="" />
