@@ -19,9 +19,11 @@ function clean(v: unknown): unknown {
 // 触达任意主进程 handler（settings:set 任意目录、unlock:run 任意文件等）。只放行已知通道。
 const HANDLER_CHANNELS = new Set<string>([
   'qq:search', 'qq:userPlaylists', 'qq:favPlaylists', 'qq:dissTracks',
+  'qq:dailyCards', 'qq:dailyRec',
   'qq:albumSearch', 'qq:albumSongs', 'qq:linkTracks',
   'ne:search', 'ne:albumSearch', 'ne:albumSongs', 'ne:playlistPage',
   'ne:account', 'ne:playlists', 'ne:playlist',
+  'ne:dailyCards', 'ne:dailyRec',
   'ne:auth:importCookie', 'ne:auth:status', 'ne:auth:clear', 'ne:auth:open',
   'dl:enqueue', 'dl:retry', 'dl:cancel',
   'settings:get', 'settings:set',

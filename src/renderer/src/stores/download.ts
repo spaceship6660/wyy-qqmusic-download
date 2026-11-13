@@ -21,6 +21,12 @@ export type UiLyricMode = 'both' | 'embed' | 'lrc' | 'none'
  *  字段必须保持纯数据：混进 Set/Map/类实例会让主进程 IPC 出口的 JSON 净化把整包静默变成 undefined。 */
 export interface UiAlbumBundle {
   source: 'qq' | 'netease'
+  /** album=普通专辑（缺省）；playlist=日推/歌单批次：不写 cover/cue/TRCK/TPOS */
+  kind?: 'album' | 'playlist'
+  /** playlist 批次里只有普通歌单为 true：文件名带歌单内位置序号（日推仍只留曲名） */
+  numberTracks?: boolean
+  /** playlist 批次的固定目录名（Q音26-10-31日推30首） */
+  dirName?: string
   id: string
   name: string
   artist: string
@@ -51,6 +57,14 @@ export interface UiQueueJob {
  *  用 \n 分行：Electron 的 window.confirm 按纯文本渲染，糊成一长句读不完。 */
 export function albumPartialConfirm(album: UiAlbumBundle, loaded: number): string {
   const total = album.totalTracks
+  if (album.kind === 'playlist') {
+    const dir = album.dirName || album.name
+    return [
+      `《${album.name}》共 ${total} 首，本页当前只加载了 ${loaded} 首（长歌单是滚动懒加载的，没加载的曲目这里不会替你去取）。`,
+      `现在下载只会下这 ${loaded} 首到「${dir}」文件夹。`,
+      `要下载全部：把本页滚到底加载完剩余曲目，再点一次「下载全部」。要继续吗？`,
+    ].join('\n')
+  }
   return [
     `《${album.name}》共 ${total} 首，本页当前只加载了 ${loaded} 首（专辑页是滚动懒加载的，没加载的曲目这里不会替你去取）。`,
     `现在下载只会下这 ${loaded} 首：音频与 cover.jpg 照常落进专辑目录，但 album.cue 不会生成。`,
@@ -63,6 +77,10 @@ export function albumPartialConfirm(album: UiAlbumBundle, loaded: number): strin
 /** 入队后的回显：整张与残缺两种说法必须不同——残缺那句不写明「这批没有 cue」，
  *  用户就会在专辑目录里找一个根本不会出现的文件。 */
 export function albumEnqueuedNotice(album: UiAlbumBundle, loaded: number): string {
+  if (album.kind === 'playlist') {
+    const dir = album.dirName || album.name
+    return `已把《${dir}》${loaded} 首加入下载队列（保存到同名文件夹）`
+  }
   return loaded < album.totalTracks
     ? `已加入 ${loaded} 首（《${album.name}》共 ${album.totalTracks} 首）：这一批不会有 album.cue，加载完剩余曲目后再点一次「下载整张」补齐`
     : `已把整张《${album.name}》${loaded} 首加入下载队列（每碟全部落盘后自动生成本碟 album.cue）`

@@ -8,6 +8,15 @@ import type { TrackDTO } from './qqapi/tracks'
  *  还会造成 albumBundle ↔ qqapi/tracks 的循环 import（这里只 import 它的类型）。 */
 export interface AlbumBundle {
   source: 'qq' | 'netease'
+  /** album=普通专辑（默认，缺省等价）；playlist=日推/歌单批次：只借「固定目录」，
+   *  不写 cover.jpg / album.cue 或 TRCK/TPOS（避免把日推序号写进原专辑标签）。
+   *  普通歌单的 playlist 批次另把 numberTracks 置 true → 文件名带歌单内位置序号。 */
+  kind?: 'album' | 'playlist'
+  /** playlist 批次里只有普通歌单为 true：落盘名用 trackNo 拼 NN 前缀（日推保持只留曲名）。
+   *  trackNo 由渲染侧按**歌单内位置**填好（勾选第 5、7 首就是 05/07，跨批次稳定）。 */
+  numberTracks?: boolean
+  /** playlist 批次的固定目录名（Q音26-10-31日推30首）；album 批次忽略 */
+  dirName?: string
   id: string            // QQ albummid / 网易云 album.id 的字符串形式（cue 与完成度键要用）
   name: string
   artist: string
@@ -102,6 +111,7 @@ export function qqAlbumCoverUrl(albumMid: string): string {
 /** 专辑目录名：歌手 - 专辑 (年)。与现有平铺命名同风格（用户拍定）；无日期时省略整个括号段，
  *  留个空括号会是个脏目录名。 */
 export function albumDirName(b: AlbumBundle): string {
+  if (b.dirName) return safeName(b.dirName)
   const year = /^\d{4}-/.test(b.date) ? b.date.slice(0, 4) : ''
   return `${safeName(b.artist)} - ${safeName(b.name)}${year ? ` (${year})` : ''}`
 }
@@ -129,7 +139,8 @@ export function albumTrackDir(downloadDir: string, b: AlbumBundle, disc: number)
   return path.join(albumRootDir(downloadDir, b), ...discSegments(b, disc))
 }
 
-/** 不含扩展名的文件名：NN 曲名。safeName 只作用于曲名本身（与平铺下载同一套字符规则），
+/** 不含扩展名的文件名：NN 曲名（album 批次与 numberTracks 的普通歌单批次；日推 playlist
+ *  直接用曲名，见 app.ts 的落盘命名）。safeName 只作用于曲名本身（与平铺下载同一套字符规则），
  *  整串一起过会让 '3 位前缀 + 空格' 占掉 safeName 的 100 字截断额度，把曲名多切几个字。
  *  trackNo 缺失按 1：QQ 服务端无序号字段（实测条目只有 belongCD/cdIdx），序号取数组下标 +1，
  *  而搜索/歌单等非专辑来源根本不填这两个字段，不能让它们拼出 'NaN 曲名'。 */

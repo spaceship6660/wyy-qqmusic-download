@@ -4,6 +4,7 @@ import {
   mkBundle, normalizeDate, discOf, qqAlbumCoverUrl, albumDirName, discSegments, trackBaseName, trackFileName, trackPad,
   albumRootDir, albumTrackDir,
 } from '../src/main/albumBundle'
+import type { AlbumBundle } from '../src/main/albumBundle'
 import type { TrackDTO } from '../src/main/qqapi/tracks'
 
 const t = (id: string, name: string, trackNo?: number, disc?: number): TrackDTO =>
@@ -153,5 +154,17 @@ describe('命名', () => {
       [t('a', 'x', 1, 1), t('c', 'y', 1, 2)])
     expect(albumRootDir('D', multi)).toBe(root)
     expect(albumTrackDir('D', multi, 2)).toBe(path.join(root, 'CD02'))
+  })
+})
+
+describe('播放列表目录名（日推）', () => {
+  it('dirName 优先于「歌手 - 专辑 (年)」：日推要的是 Q音26-10-31日推30首 这种固定目录', () => {
+    const b: AlbumBundle = {
+      source: 'qq', kind: 'playlist', dirName: 'Q音26-10-31日推30首',
+      id: 'rec:qq:daily30:2026-10-31', name: '日推30首', artist: '', date: '2026-10-31',
+      company: '', coverUrl: '', totalTracks: 30, discs: [1], discTotals: { 1: 30 },
+    }
+    expect(albumDirName(b)).toBe('Q音26-10-31日推30首')
+    expect(albumRootDir('D', b)).toBe(path.join('D', 'Q音26-10-31日推30首'))
   })
 })

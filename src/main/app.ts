@@ -4,6 +4,8 @@ import { createQqClient } from './qqapi/client'
 import { searchTracks, getTrackDetail, getSingleTrack, parseLink, fetchPlaylist, fetchAlbumInfo, fetchLyric, searchAlbums, describeTierSizes, availableTiers, TrackDTO, TrackDetail, Quality } from './qqapi/tracks'
 import { getAudioUrl, QUALITY_MAP } from './qqapi/urls'
 import { getUserPlaylists, getFavPlaylists, getDissTracksPage } from './qqapi/playlists'
+import { getQqDailyCards, getQqDaily30, getQqOfficialPlaylist } from './qqapi/recommend'
+import type { QqDailyMode } from './qqapi/recommend'
 import { getLoginUserInfo, isQqLoginExpired } from './qqapi/user'
 import { createAuth } from './auth'
 import { createNeClient } from './neteaseapi/client'
@@ -12,6 +14,8 @@ import { neSearch, neUserPlaylist, nePlaylistDetail, neGetTrackDetail, neAccount
 import type { NeAccount } from './neteaseapi/tracks'
 import { neFetchLyric } from './neteaseapi/lyric'
 import { neSearchAlbums, neAlbumInfo, nePlaylistPage } from './neteaseapi/tracks'
+import { getNeDailyCards, getNeDailyPage } from './neteaseapi/recommend'
+import type { NeDailyMode } from './neteaseapi/recommend'
 import { neGetAudioUrl } from './neteaseapi/urls'
 import { cdnFallbackUrls } from './neteaseapi/cdn'
 import { createNeAuth, neLoggedInFromAccount } from './neteaseAuth'
@@ -223,7 +227,8 @@ export function createApp(deps: AppDeps) {
     job.finalQuality = first.quality
     // 2) 下载（原子占位防并发撞名：wx 创建，EEXIST 则换后缀重试；
     //    占位文件在下载成功后由 renameSync 覆盖，Windows REPLACE_EXISTING 语义）
-    //    整张专辑模式：落 专辑根目录[/CDnn]/NN 曲名.ext；平铺模式：落 歌名 - 歌手.ext（行为一字不改）
+    //    整张专辑模式：落 专辑根目录[/CDnn]/NN 曲名.ext；平铺模式：落 歌名 - 歌手.ext（行为一字不改）；
+    //    日推批次落固定目录/曲名.ext（入队序号不是原专辑曲序，名字里不加序号）
     //    目录算式只在 albumBundle.albumTrackDir 里有一份——Task 12 写 cover.jpg / album.cue 复用
     //    同一个函数，这里再拼一遍就会漂成「cue 指向音频不在的目录」，且要到用户加载 cue 才暴露。
     //    disc 回落 discs[0]（而非 1）：单曲没带碟号时，它属于这张专辑的第一碟。
@@ -232,7 +237,9 @@ export function createApp(deps: AppDeps) {
       ? albumTrackDir(settings.downloadDir, bundle, job.track.disc ?? bundle.discs[0] ?? 1)
       : settings.downloadDir
     const name = bundle
-      ? trackBaseName(job.track, trackPad(bundle))
+      ? bundle.kind === 'playlist' && !bundle.numberTracks
+        ? safeName(job.track.name)
+        : trackBaseName(job.track, trackPad(bundle))
       : `${safeName(job.track.name)} - ${safeName(job.track.artist)}`
     fs.mkdirSync(dir, { recursive: true })
     const reserveDest = (extension: string): string => {
@@ -303,6 +310,8 @@ export function createApp(deps: AppDeps) {
         const info = detail ?? (await spec.fetchDetail())
         const cover = await fetchCover(job.track.cover, fetchImpl, signal)
         const embedLyrics = lyricMode === 'both' || lyricMode === 'embed'
+        // 日推 playlist 批次只借专辑的目录，序号不是原专辑曲序：TRCK/TPOS 一律不写。
+        const seqAlbum = job.album && job.album.kind !== 'playlist' ? job.album : undefined
         const meta = {
           title: job.track.name,
           artist: job.track.artist,
@@ -313,12 +322,12 @@ export function createApp(deps: AppDeps) {
           lyrics: embedLyrics ? lyrics : '',
           // 序号只在「整张」时给：平铺下载这几个全是 undefined → TRCK/TPOS 一帧都不写（0.6.1 产物逐字节一致）。
           // 总数取 album 而不是批次里数到的曲目数：专辑共 10 首、只勾了 2 首时，标签该写「1/10」而不是「1/2」。
-          track: job.album ? job.track.trackNo : undefined,
-          trackTotal: job.album ? job.album.totalTracks : undefined,
+          track: seqAlbum ? job.track.trackNo : undefined,
+          trackTotal: seqAlbum ? seqAlbum.totalTracks : undefined,
           // disc 回落 discs[0]，与上面落盘目录同一个算式：两处不一致时标签说的碟号和文件真在的碟目录会各说一套
-          disc: job.album ? (job.track.disc ?? job.album.discs[0]) : undefined,
+          disc: seqAlbum ? (job.track.disc ?? seqAlbum.discs[0]) : undefined,
           // 碟总数只在多碟时写：单碟写「1/1」等于凭空造出「这专辑共分一碟」这个没人说过的事实
-          discTotal: job.album && job.album.discs.length > 1 ? job.album.discs.length : undefined,
+          discTotal: seqAlbum && seqAlbum.discs.length > 1 ? seqAlbum.discs.length : undefined,
           cover: cover?.data,
           coverMime: cover?.mime,
         }
@@ -439,7 +448,7 @@ export function createApp(deps: AppDeps) {
     // 附属文件（cover/cue）是「下载成功之后」的副作用：写坏了不许把这行变成失败行，
     // 但也不能 `void` 一丢了之——async 函数的 reject 没人接就是 unhandled rejection，
     // Node 15+ 默认把它升成进程级崩溃。这里显式接住并落诊断日志。
-    if (j.album) {
+    if (j.album && j.album.kind !== 'playlist') {
       const key = albumKey(j.album)
       writeAlbumExtras(j).catch((e) => dbgFile?.(`专辑 ${key} 附属文件写入失败：${e instanceof Error ? e.message : String(e)}`))
     }
@@ -590,6 +599,11 @@ export function createApp(deps: AppDeps) {
         euin: auth.getEncHostUin() || undefined,
         songBegin: params.songBegin ?? 0,
       }, dbgFile),
+    /** 日推总览卡片：封面/数量/今日是否已生成；单卡失败只带 error，不拖垮整页 */
+    qqDailyCards: () => getQqDailyCards(client),
+    /** 日推歌单页：tracks + playlist bundle（固定目录 + 曲名命名） */
+    qqDailyRec: (mode: QqDailyMode) =>
+      mode === 'daily30' ? getQqDaily30(client) : getQqOfficialPlaylist(client, mode),
     parseLink: async (url: string) => {
       const kind = parseLink(url)
       if (!kind) return null
@@ -608,7 +622,7 @@ export function createApp(deps: AppDeps) {
     enqueue: (payload: { tracks: TrackDTO[]; quality: Settings['quality']; lyricMode?: Settings['lyricMode']; source: 'qq' | 'netease'; album?: AlbumBundle }) => {
       const { tracks, quality, lyricMode, source, album } = payload
       // 注：质量是每批任务参数，不再回写 settings——持久化职责归 settings:set（renderer 单一事实源）
-      // album 整批共用一份：它决定落盘目录与 NN 命名，故也随 jobSpecs 登记，
+      // album 整批共用一份：它决定落盘目录（专辑批次还决定 NN 命名），故也随 jobSpecs 登记，
       // 否则重试那次没有它、这首歌掉回平铺根，一张专辑从此裂在两个目录里。
       // 同次入队按 track.id 去重（重复 id 只留一份）
       const seen = new Set<string>()
@@ -633,7 +647,8 @@ export function createApp(deps: AppDeps) {
       // 那一槽永远等不到落盘，整碟就再也出不了 cue。
       // 这里只贡献 trackNo → 碟号；「这一碟该有几首」取自 album.discTotals（专辑真实曲目数），
       // 否则懒加载页只入队了前两首也算「齐」，会写出一份把 10 首专辑呈成 2 首的 cue。
-      if (album) packager.plan(album, jobs.map((j) => j.track))
+      // playlist 批次不出 cue，也就不需要完成度期望表
+      if (album && album.kind !== 'playlist') packager.plan(album, jobs.map((j) => j.track))
       queue.enqueue(jobs)
       return true
     },
@@ -718,6 +733,8 @@ export function createApp(deps: AppDeps) {
     neAccount: () => neAccountProbe(),
     nePlaylists: (uid: number) => neUserPlaylist(neClient, uid),
     nePlaylist: (id: string) => nePlaylistDetail(neClient, id),
+    neDailyCards: () => getNeDailyCards(neClient),
+    neDailyRec: (mode: NeDailyMode) => getNeDailyPage(neClient, mode),
     neAuthImport: (header: string) => {
       neAccountCache = null
       const ok = neAuth.importCookie(header)

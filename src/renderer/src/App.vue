@@ -11,6 +11,7 @@ import DownloadOptions from './components/DownloadOptions.vue'
 import DownloadFloatCard from './components/DownloadFloatCard.vue'
 import { useDownloadStore, albumPartialConfirm, albumEnqueuedNotice } from './stores/download'
 import type { UiTrack, UiAlbumBundle } from './stores/download'
+import { buildPlaylistBundle, withPlaylistPositions } from './playlistBundle'
 import { api } from './api'
 
 // 界面模型（2026-09-06 用户定稿）：左侧两级导航。
@@ -20,6 +21,17 @@ import { api } from './api'
 type Tab = 'qq' | 'netease' | 'download' | 'decrypt' | 'settings'
 interface QqPlaylist { id: string; name: string; cover: string; trackCount: number }
 interface NePlaylist { id: number; name: string; liked: boolean; subscribed?: boolean; creatorUid?: number; trackCount: number; cover: string }
+interface DailyCard {
+  source: 'qq' | 'netease'
+  mode: string
+  title: string
+  desc: string
+  cover: string
+  count: number | null
+  tag?: string
+  updatedAt?: string
+  error?: string
+}
 
 const tab = ref<Tab>('qq')
 const store = useDownloadStore()
@@ -43,7 +55,20 @@ type LoadCursor =
 type SongsBack =
   | { kind: 'albums'; query: string }
   | { kind: 'group'; source: 'qq' | 'netease'; group: 'created' | 'fav' }
+  | { kind: 'daily'; source: 'qq' | 'netease' }
 const groupView = ref<{ source: 'qq' | 'netease'; group: 'created' | 'fav' } | null>(null)
+const groupLoading = ref(false)
+/** 歌单列表刷新序号：连点侧栏/手动刷新时，过期响应的收尾不覆盖新请求的状态 */
+let groupSeq = 0
+/** 日推总览页（QQ 4 张卡 / 网易云 3 张卡）；songsView 非空时让位给歌曲页 */
+const dailyView = ref<{ source: 'qq' | 'netease' } | null>(null)
+const dailyCards = ref<Record<'qq' | 'netease', DailyCard[]>>({ qq: [], netease: [] })
+const dailyCardsLoading = ref(false)
+const dailyCardsError = ref('')
+let dailySeq = 0
+const shownDailyCards = computed<DailyCard[]>(() =>
+  dailyView.value ? dailyCards.value[dailyView.value.source] : [],
+)
 // album：仅专辑来源填充的批次元数据，Task 13 的「下载整张」靠它算目录/cue；非专辑视图为 undefined
 const songsView = ref<{ title: string; source: 'qq' | 'netease'; total?: number; cursor?: LoadCursor; cacheKey?: string; album?: UiAlbumBundle } | null>(null)
 const albumsView = ref<{ source: 'qq' | 'netease'; query: string; albums: Array<{ mid: string; name: string; singer: string; cover: string; songCount: number }> } | null>(null)
@@ -193,10 +218,15 @@ async function openSongsView(opts: {
   fetchFirst: () => Promise<FirstPageResult | null>
   reload: () => Promise<void>
   force?: boolean
+  /** false = 不读不写 songsCache（日推每天变化，缓存会把昨天的列表留下来） */
+  cache?: boolean
 }): Promise<void> {
   const { key, title, source, back } = opts
+  // 进入非日推来源时收起日推总览，避免返回链残留
+  if (back?.kind !== 'daily') dailyView.value = null
   songsReload = opts.reload
-  const hit = opts.force ? undefined : songsCache.get(key)
+  const useCache = opts.cache !== false
+  const hit = !useCache || opts.force ? undefined : songsCache.get(key)
   if (hit && hit.source === source) {
     // 秒开：同步渲染旧数据，网络在后台静默追新（有 diff 才更新，无感）。
     // 先作废在途请求：否则上一次的慢响应会在切到本次（缓存）后把视图拽回去
@@ -221,10 +251,12 @@ async function openSongsView(opts: {
       return
     }
     store.setTracks(fp.tracks, source)
-    cacheSongs(key, {
-      tracks: [...fp.tracks], total: fp.total, cursor: fp.cursor, source, album: fp.album,
-      firstIds: fp.tracks.map((t) => t.id), fetchedAt: Date.now(),
-    })
+    if (useCache) {
+      cacheSongs(key, {
+        tracks: [...fp.tracks], total: fp.total, cursor: fp.cursor, source, album: fp.album,
+        firstIds: fp.tracks.map((t) => t.id), fetchedAt: Date.now(),
+      })
+    }
     songsView.value = { title, source, total: fp.total, cursor: fp.cursor, cacheKey: key, album: fp.album }
     songsBack.value = back
   } catch (e) {
@@ -290,6 +322,7 @@ function goTab(t: Tab): void {
   loadSeq++ // 作废在途的歌曲列表请求，防止慢响应把视图拉回旧列表
   tab.value = t
   groupView.value = null
+  dailyView.value = null
   songsView.value = null
   albumsView.value = null
   listNotice.value = ''
@@ -321,6 +354,14 @@ function goBack(): void {
     songsReload = null
     scrollTop()
     return
+  } else if (back?.kind === 'daily') {
+    songsView.value = null
+    dailyView.value = { source: back.source }
+    listNotice.value = ''
+    songsBack.value = null
+    songsReload = null
+    scrollTop()
+    return
   }
   goTab(src === 'qq' ? 'qq' : 'netease')
 }
@@ -346,6 +387,7 @@ async function doSearch(force = true): Promise<void> {
   const text = q.value.trim()
   if (!text) return
   loadSeq++ // 离开歌曲列表视图：作废在途列表请求
+  dailyView.value = null
   const my = ++searchSeq
   try {
     if (/y\.qq\.com\/n\/ryqq\/(songDetail|playlist|albumDetail)/.test(text)) {
@@ -394,6 +436,7 @@ async function albumSearch(): Promise<void> {
   if (!text) return
   loadSeq++
   const my = ++searchSeq
+  dailyView.value = null
   groupView.value = null
   songsView.value = null
   songsBack.value = null
@@ -610,6 +653,29 @@ async function refreshNePlaylists(): Promise<void> {
   }
 }
 
+/** 重拉当前歌单列表：进入歌单页即拉，手动 ↻ 也走这里。
+ *  旧列表留在屏上，成功才原地替换——新建的歌单不必重启应用才出现；
+ *  失败只回显原因，不清空已有列表（此前只在列表为空时懒刷新，有过数据就再也刷不到新歌单）。 */
+async function refreshGroupPage(): Promise<void> {
+  const gv = groupView.value
+  if (!gv) return
+  const my = ++groupSeq
+  groupLoading.value = true
+  listNotice.value = ''
+  try {
+    if (gv.source === 'qq') {
+      await refreshQqPlaylists()
+    } else {
+      await refreshNePlaylists()
+      if (my === groupSeq && nePlaylistError.value) listNotice.value = nePlaylistError.value
+    }
+  } catch (e) {
+    if (my === groupSeq) listNotice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    if (my === groupSeq) groupLoading.value = false
+  }
+}
+
 // ---------- 次级导航动作 ----------
 /** 我喜欢的音乐（QQ：dirid=201；网易云：specialType=5 歌单；缓存秒开 + 后台 diff 更新） */
 async function openLiked(source: 'qq' | 'netease', force = false): Promise<void> {
@@ -628,6 +694,7 @@ async function openLiked(source: 'qq' | 'netease', force = false): Promise<void>
           tracks: r.tracks,
           total: r.total,
           cursor: qqPageCursor(r, { dirid: 201 }, r.tracks.length),
+          album: buildPlaylistBundle('qq', 'qq:liked', '我喜欢的音乐', r.total ?? r.tracks.length),
         }
       },
       reload: () => openLiked('qq', true),
@@ -675,15 +742,19 @@ async function openNePlaylist(
       const cursor: LoadCursor | undefined = r.more
         ? { kind: 'ne-playlist', id: String(id), offset: typeof r.nextOffset === 'number' ? r.nextOffset : r.tracks.length }
         : undefined
-      return { tracks: r.tracks, total: r.total, cursor }
+      return {
+        tracks: r.tracks, total: r.total, cursor,
+        album: buildPlaylistBundle('netease', `ne:pl:${id}`, title, r.total ?? r.tracks.length),
+      }
     },
     reload: () => openNePlaylist(id, title, true, fromGroup ?? null),
   })
 }
 
-/** 歌单列表页（自建/收藏） */
+/** 歌单列表页（自建/收藏）：每次进入都重拉，新建/收藏的歌单立刻可见 */
 async function openGroup(source: 'qq' | 'netease', group: 'created' | 'fav'): Promise<void> {
   loadSeq++
+  dailyView.value = null
   songsView.value = null
   albumsView.value = null
   songsBack.value = null
@@ -691,13 +762,7 @@ async function openGroup(source: 'qq' | 'netease', group: 'created' | 'fav'): Pr
   groupView.value = { source, group }
   listNotice.value = ''
   scrollTop()
-  // 懒刷新失败不再静默吞掉：歌单页直接显示原因（此前空列表 + 一句固定文案，查无可查）
-  try {
-    if (source === 'qq' && group === 'fav' && qqFav.value.length === 0) await refreshQqPlaylists()
-    if (source === 'netease' && nePlaylists.value.length === 0) await refreshNePlaylists()
-  } catch (e) {
-    listNotice.value = e instanceof Error ? e.message : String(e)
-  }
+  await refreshGroupPage()
 }
 
 /** 打开具体歌单 → 歌曲列表视图（缓存秒开 + 后台 diff 更新；返回回到歌单列表） */
@@ -722,9 +787,56 @@ async function openPlaylist(source: 'qq' | 'netease', id: string | number, title
         tracks: r.tracks,
         total: r.total,
         cursor: qqPageCursor(r, { disstid: Number(id) }, r.tracks.length),
+        album: buildPlaylistBundle('qq', `qq:diss:${id}`, title, r.total ?? r.tracks.length),
       }
     },
     reload: () => openPlaylist(source, id, title, true),
+  })
+}
+
+// ---------- 日推 ----------
+/** 日推总览：卡片带封面/数量/今日是否已生成；每次进入都重拉，避免停在昨天的卡片上 */
+async function openDaily(source: 'qq' | 'netease'): Promise<void> {
+  loadSeq++
+  tab.value = source
+  groupView.value = null
+  songsView.value = null
+  albumsView.value = null
+  listNotice.value = ''
+  songsBack.value = null
+  songsReload = null
+  dailyView.value = { source }
+  dailyCardsError.value = ''
+  scrollTop()
+  const my = ++dailySeq
+  dailyCardsLoading.value = true
+  try {
+    const cards = await api.invoke<DailyCard[]>(source === 'qq' ? 'qq:dailyCards' : 'ne:dailyCards')
+    if (my !== dailySeq) return
+    dailyCards.value = { ...dailyCards.value, [source]: cards ?? [] }
+  } catch (e) {
+    if (my !== dailySeq) return
+    dailyCardsError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    if (my === dailySeq) dailyCardsLoading.value = false
+  }
+}
+
+/** 点开一张日推卡：每次都从主进程取当天列表（不走 songsCache），整批下载用返回的 playlist bundle */
+async function openDailyEntry(card: DailyCard): Promise<void> {
+  await openSongsView({
+    key: `daily:${card.source}:${card.mode}`,
+    title: card.title,
+    source: card.source,
+    back: { kind: 'daily', source: card.source },
+    cache: false,
+    emptyNotice: `${card.title}加载失败（可能需要重新登录，或今日尚未生成）`,
+    fetchFirst: async () => {
+      const r: any = await api.invoke(card.source === 'qq' ? 'qq:dailyRec' : 'ne:dailyRec', card.mode)
+      if (!r?.tracks?.length) return null
+      return { tracks: r.tracks, total: r.tracks.length, album: r.bundle }
+    },
+    reload: () => openDailyEntry(card),
   })
 }
 
@@ -768,9 +880,28 @@ const albumButtonLabel = computed(() => {
   const a = songsView.value?.album
   if (!a) return '下载整张'
   const loaded = store.tracks.length
+  if (a.kind === 'playlist') {
+    return loaded < a.totalTracks
+      ? `下载全部（已加载 ${loaded} / ${a.totalTracks} 首）`
+      : `下载全部（${loaded} 首）`
+  }
   return loaded < a.totalTracks
     ? `下载整张（已加载 ${loaded} / ${a.totalTracks} 首）`
     : `下载整张（${loaded} 首）`
+})
+
+/** 「下载整张 / 下载全部」按钮的悬停说明：
+ *  专辑说清会不会有 cue，日推/歌单说清落到哪个同名文件夹。 */
+const albumButtonTitle = computed(() => {
+  const a = songsView.value?.album
+  if (!a) return ''
+  if (a.kind === 'playlist') {
+    const loaded = store.tracks.length
+    return loaded < a.totalTracks
+      ? `下载本页已加载的 ${loaded} 首到「${a.dirName || a.name}」文件夹（歌单共 ${a.totalTracks} 首；忽略当前勾选）`
+      : `下载全部 ${loaded} 首到「${a.dirName || a.name}」文件夹（忽略当前勾选）`
+  }
+  return `下载该专辑${a.totalTracks} 首到专辑子目录（忽略当前勾选；档位按上方选择条）`
 })
 
 /** 整张下载：忽略勾选，把本页**已加载**的全部曲目 + 批次上下文一起入队 → 落专辑子目录，
@@ -780,9 +911,10 @@ const albumButtonLabel = computed(() => {
 function enqueueWholeAlbum(album: UiAlbumBundle, tracks: UiTrack[]): void {
   if (!tracks.length || queueing.value) return
   if (tracks.length < album.totalTracks && !window.confirm(albumPartialConfirm(album, tracks.length))) return
+  const payloadTracks = album.numberTracks ? withPlaylistPositions(tracks, tracks) : tracks
   queueing.value = true
   void api.invoke('dl:enqueue', {
-    tracks, quality: store.quality, lyricMode: store.lyricMode, source: album.source, album,
+    tracks: payloadTracks, quality: store.quality, lyricMode: store.lyricMode, source: album.source, album,
   }).then(() => {
     listNotice.value = albumEnqueuedNotice(album, tracks.length)
     // 与勾选下载一致：不跳页，进度看底部工具栏「下载中 N」，左上浮卡自动弹出
@@ -800,8 +932,13 @@ async function downloadSelected(): Promise<void> {
   try {
     const selected = store.tracks.filter((t) => store.selectedIds.has(t.id))
     if (selected.length) {
+      // 普通歌单页：带歌单批次入队 → 落「歌单名」目录；序号按歌单内位置，不按这次勾选顺序。
+      // 日推勾选单下维持平铺（与既有行为/文档一致）。
+      const viewAlbum = songsView.value?.album
+      const bundle = viewAlbum?.kind === 'playlist' && viewAlbum.numberTracks ? viewAlbum : undefined
+      const tracks = bundle?.numberTracks ? withPlaylistPositions(selected, store.tracks) : selected
       await api.invoke('dl:enqueue', {
-        tracks: selected, quality: store.quality, lyricMode: store.lyricMode, source: ctxSource.value,
+        tracks, quality: store.quality, lyricMode: store.lyricMode, source: ctxSource.value, album: bundle,
       })
       store.clear()
       // 不跳页：留在当前列表继续勾选，进度看底部工具栏「下载中 N」→ 点进去即到我的下载；
@@ -908,10 +1045,15 @@ onMounted(() => {
   api.on('ne:authChanged', () => onNeAuthChanged())
 })
 
-const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'): boolean => {
+const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked' | 'daily'): boolean => {
+  if (group === 'daily') {
+    return (dailyView.value?.source === source && songsView.value === null)
+      || (songsBack.value?.kind === 'daily' && songsBack.value.source === source)
+  }
   if (group === 'liked') return songsView.value?.source === source && songsView.value?.title === '我喜欢的音乐'
   if (group) return groupView.value?.source === source && groupView.value?.group === group
-  return groupView.value === null && songsView.value === null && tab.value === (source === 'qq' ? 'qq' : 'netease')
+  return groupView.value === null && dailyView.value === null && songsView.value === null
+    && tab.value === (source === 'qq' ? 'qq' : 'netease')
 }
 </script>
 
@@ -925,12 +1067,14 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           <button class="sub" :class="{ active: subActive('qq', 'liked') }" @click="openLiked('qq')">· 我喜欢的音乐</button>
           <button class="sub" :class="{ active: subActive('qq', 'created') }" @click="openGroup('qq', 'created')">· 自建歌单</button>
           <button class="sub" :class="{ active: subActive('qq', 'fav') }" @click="openGroup('qq', 'fav')">· 收藏的歌单</button>
+          <button class="sub" :class="{ active: subActive('qq', 'daily') }" @click="openDaily('qq')">· 日推</button>
         </template>
         <button :class="{ active: subActive('netease') }" @click="goTab('netease')">网易云</button>
         <template v-if="store.neLoggedIn">
           <button class="sub" :class="{ active: subActive('netease', 'liked') }" @click="openLiked('netease')">· 我喜欢的音乐</button>
           <button class="sub" :class="{ active: subActive('netease', 'created') }" @click="openGroup('netease', 'created')">· 自建歌单</button>
           <button class="sub" :class="{ active: subActive('netease', 'fav') }" @click="openGroup('netease', 'fav')">· 收藏的歌单</button>
+          <button class="sub" :class="{ active: subActive('netease', 'daily') }" @click="openDaily('netease')">· 日推</button>
         </template>
         <button :class="{ active: tab === 'download' }" @click="goTab('download')">我的下载</button>
         <button :class="{ active: tab === 'decrypt' }" @click="goTab('decrypt')">解密</button>
@@ -964,9 +1108,43 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
       </div>
     </aside>
     <main ref="contentEl" class="content" @scroll.passive="onContentScroll">
+      <!-- 日推总览页（QQ 4 张 / 网易云 3 张；点开歌曲页时让位给 songsView） -->
+      <section v-if="dailyView && !songsView" class="daily-page">
+        <h2>{{ dailyView.source === 'qq' ? 'QQ 音乐' : '网易云' }} · 日推</h2>
+        <p class="daily-hint">每日自动更新。点卡片查看当天歌曲；勾选单下保持平铺，整批下载落到同名文件夹。</p>
+        <p v-if="dailyCardsLoading" class="loading">正在获取今日日推…<span class="spinner"></span></p>
+        <p v-if="dailyCardsError" class="notice">{{ dailyCardsError }}</p>
+        <div v-if="shownDailyCards.length" class="daily-grid">
+          <div
+            v-for="c in shownDailyCards"
+            :key="c.mode"
+            class="daily-card"
+            :class="{ disabled: !!c.error }"
+            @click="!c.error && openDailyEntry(c)"
+          >
+            <div class="daily-cover" :style="c.cover ? { backgroundImage: `url(${c.cover})` } : {}">
+              <span v-if="c.count" class="daily-count">{{ c.count }} 首</span>
+            </div>
+            <div class="daily-title">{{ c.title }}</div>
+            <div class="daily-desc">{{ c.desc }}</div>
+            <div v-if="c.error" class="daily-error">{{ c.error }}</div>
+            <div v-else class="daily-meta">每日更新<span v-if="c.updatedAt"> · {{ c.updatedAt }}</span></div>
+          </div>
+        </div>
+        <div v-else-if="!dailyCardsLoading" class="empty">暂无日推内容</div>
+      </section>
       <!-- 歌单列表页（自建/收藏） -->
-      <section v-if="groupView" class="plist-page">
-        <h2>{{ groupView.source === 'qq' ? 'QQ 音乐' : '网易云' }} · {{ groupView.group === 'created' ? '自建歌单' : '收藏的歌单' }}</h2>
+      <section v-else-if="groupView" class="plist-page">
+        <div class="plist-head">
+          <h2>{{ groupView.source === 'qq' ? 'QQ 音乐' : '网易云' }} · {{ groupView.group === 'created' ? '自建歌单' : '收藏的歌单' }}</h2>
+          <button
+            class="back-btn"
+            title="重新拉取歌单列表"
+            :disabled="groupLoading"
+            @click="refreshGroupPage()"
+          >↻ 刷新</button>
+          <span v-if="groupLoading" class="reval">刷新中…</span>
+        </div>
         <p v-if="listNotice" class="notice">{{ listNotice }}</p>
         <div v-if="groupList.length" class="plist-grid">
           <div v-for="p in groupList" :key="p.id" class="plist-card" @click="openPlaylist(groupView.source, p.id, p.name)">
@@ -975,7 +1153,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
           </div>
         </div>
         <div v-else class="empty">
-          {{ favHint }}
+          {{ groupLoading ? '加载中…' : favHint }}
         </div>
       </section>
       <!-- 歌曲列表页（我喜欢的 / 歌单歌曲 / 链接导入） -->
@@ -996,7 +1174,7 @@ const subActive = (source: 'qq' | 'netease', group?: 'created' | 'fav' | 'liked'
             v-if="songsView.album && store.trackSource === songsView.album.source"
             class="back-btn"
             :disabled="!store.tracks.length || queueing"
-            :title="`下载该专辑${songsView.album.totalTracks} 首到专辑子目录（忽略当前勾选；档位按上方选择条）`"
+            :title="albumButtonTitle"
             @click="enqueueWholeAlbum(songsView.album, store.tracks)"
           >{{ albumButtonLabel }}</button>
         </div>
@@ -1137,6 +1315,7 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
 .login-btn:hover { filter: brightness(0.93); }
 .songs-head { display: flex; align-items: center; gap: 10px; }
 .songs-head h2 { font-size: 17px; margin: 0; }
+.plist-head { display: flex; align-items: center; gap: 10px; }
 .back-btn {
   padding: 4px 12px;
   font-size: 13px;
@@ -1148,6 +1327,7 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
   flex-shrink: 0;
 }
 .back-btn:hover { border-color: #31c27c; color: #31c27c; }
+.back-btn:disabled { opacity: 0.55; cursor: default; border-color: #d0d0d0; color: #666; }
 .loading-mask {
   display: flex;
   flex-direction: column;
@@ -1174,6 +1354,34 @@ body { margin: 0; font-family: system-ui, 'Microsoft YaHei', sans-serif; backgro
 .empty { color: #888; font-size: 13px; padding: 24px 0; }
 .plist-page, .songs-page { display: flex; flex-direction: column; gap: 12px; }
 .plist-page h2, .songs-page h2 { font-size: 17px; margin: 0; }
+.daily-page { display: flex; flex-direction: column; gap: 12px; }
+.daily-page h2 { font-size: 17px; margin: 0; }
+.daily-hint { margin: 0; color: #888; font-size: 13px; }
+.daily-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.daily-card {
+  background: #fff;
+  border: 1px solid #e6e8ec;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.daily-card:hover { box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08); transform: translateY(-1px); }
+.daily-card.disabled { cursor: default; opacity: 0.72; }
+.daily-cover {
+  height: 140px;
+  background: #e8edf0 url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="%23b9c6cc"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>') no-repeat center;
+  background-size: cover, 36px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 8px;
+}
+.daily-count { background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+.daily-title { font-size: 15px; font-weight: 600; margin: 10px 12px 4px; }
+.daily-desc { font-size: 12px; color: #888; margin: 0 12px 8px; min-height: 32px; }
+.daily-meta { font-size: 11px; color: #31c27c; margin: 0 12px 12px; }
+.daily-error { font-size: 11px; color: #d33; margin: 0 12px 12px; word-break: break-all; }
 .plist-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
 .plist-card { cursor: pointer; }
 .plist-cover {

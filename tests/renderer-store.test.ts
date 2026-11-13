@@ -317,3 +317,37 @@ describe('「下载整张」文案（0.7.0 Task 13）', () => {
     expect(albumEnqueuedNotice(multi, 10)).toContain('本碟 album.cue')
   })
 })
+
+describe('日推 playlist 的回显（0.8.0）', () => {
+  const album: UiAlbumBundle = {
+    source: 'qq', id: 'rec:qq:daily30:2026-10-31', name: '日推30首', artist: '',
+    date: '2026-10-31', company: '', coverUrl: '', totalTracks: 30, discs: [1], discTotals: { 1: 30 },
+  }
+  it('回显固定目录名，不承诺 album.cue（日推不是专辑）', () => {
+    const playlist: UiAlbumBundle = { ...album, kind: 'playlist', dirName: 'Q音26-10-31日推30首' }
+    const msg = albumEnqueuedNotice(playlist, 30)
+    expect(msg).toContain('Q音26-10-31日推30首')
+    expect(msg).not.toContain('album.cue')
+  })
+})
+
+describe('普通歌单批次的残缺确认（0.8.x）', () => {
+  const playlist: UiAlbumBundle = {
+    source: 'netease', kind: 'playlist', numberTracks: true, dirName: 'mimi',
+    id: 'ne:pl:1', name: 'mimi', artist: '', date: '', company: '', coverUrl: '',
+    totalTracks: 1500, discs: [1], discTotals: { 1: 1500 },
+  }
+  it('说清只下已加载的、落到同名文件夹，不提 cue（歌单没有 cue 这回事）', () => {
+    const s = albumPartialConfirm(playlist, 200)
+    expect(s).toContain('mimi')
+    expect(s).toContain('1500')
+    expect(s).toContain('200')
+    expect(s).not.toContain('cue')
+    expect(s).toContain('「下载全部」')
+  })
+  it('入队回显仍然报歌单名与已入队数', () => {
+    const msg = albumEnqueuedNotice(playlist, 200)
+    expect(msg).toContain('mimi')
+    expect(msg).toContain('200')
+  })
+})

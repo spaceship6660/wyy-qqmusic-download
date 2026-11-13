@@ -7,6 +7,7 @@ import { createApp } from '../src/main/app'
 import type { App } from '../src/main/app'
 import type { Quality, TrackDTO } from '../src/main/qqapi/tracks'
 import type { AlbumBundle } from '../src/main/albumBundle'
+import { dailyDirName, todayShanghai } from '../src/main/dailyRec'
 import NodeID3 from 'node-id3'
 import { parseFile } from 'music-metadata'
 
@@ -1540,4 +1541,184 @@ describe('整张专辑的 cover 与 cue 落盘（0.7.0 Task 12）', () => {
     // 其余标签照旧（不是把打标签整步跳了才没有 TRCK 的）
     expect((NodeID3.read(path.join(env.dl, 't1 - S.mp3')) as any).title).toBe('t1')
   })
+})
+
+// ---------- 0.8.0：日推播放列表落盘 ----------
+// 复用专辑的「固定目录」，但 playlist 批次不是专辑：文件名只留曲名（不加序号），
+// 也不写 cover.jpg / album.cue、不写 TRCK/TPOS（日推序号不是原专辑的曲序）。
+describe('日推播放列表落盘（0.8.0）', () => {
+  const DIR = 'Q音26-10-31日推30首'
+  const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('cover-body')])
+  const COVER = 'http://cover.test/cover.jpg'
+  const rawFrames = (file: string): Record<string, unknown> => (NodeID3.read(file).raw ?? {}) as Record<string, unknown>
+  const settle = async (ms = 400): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+  it('playlist bundle → 固定目录 + 曲名（无序号）；不写 cover/cue/TRCK/TPOS', async () => {
+    const env = await makeEnv({ coverBytes: JPEG })
+    env.app.enqueue({
+      tracks: [
+        { id: 'a1', name: 't1', artist: 'S', album: 'A', cover: '', trackNo: 1, disc: 1 },
+        { id: 'a2', name: 't2', artist: 'S', album: 'A', cover: '', trackNo: 2, disc: 1 },
+      ],
+      quality: '320',
+      source: 'qq',
+      album: {
+        source: 'qq', kind: 'playlist', dirName: DIR, id: 'rec:qq:daily30:2026-10-31',
+        name: '日推30首', artist: '', date: '2026-10-31', company: '', coverUrl: COVER,
+        totalTracks: 2, discs: [1], discTotals: { 1: 2 },
+      },
+    })
+    await waitFor(() => env.events.done >= 2)
+    await settle()
+    expect(env.events.failed).toBe(0)
+    const dir = path.join(env.dl, DIR)
+    expect(fs.readdirSync(dir).sort()).toEqual(['t1.mp3', 't2.mp3'])
+    expect(rawFrames(path.join(dir, 't1.mp3')).TRCK).toBeUndefined()
+    expect(rawFrames(path.join(dir, 't1.mp3')).TPOS).toBeUndefined()
+    // 平铺根不得多出副本
+    expect(fs.readdirSync(env.dl)).toEqual([DIR])
+  })
+})
+
+// ---------- 0.8.0：日推 IPC 装配 ----------
+// 只验 app 层把两个源的四/三个入口接到正确函数，并返回 tracks+bundle；接口解析细节在
+// qqapi-recommend / neteaseapi-recommend 的单测里覆盖。
+describe('日推 IPC 装配（0.8.0）', () => {
+  const dirs: string[] = []
+  afterEach(() => {
+    for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true })
+  })
+
+  const qqSong = (mid: string) => ({ mid, name: `q${mid}`, singer: [{ name: 'S' }], album: { name: 'A' }, file: { media_mid: mid }, interval: 200, pay: { pay_play: 0, pay_down: 0 } })
+  const neSong = (id: number, shape: 'daily' | 'style') => shape === 'daily'
+    ? { id, name: `n${id}`, fee: 8, duration: 200000, artists: [{ name: 'S' }], album: { name: 'A', picUrl: `http://cover/${id}.jpg` } }
+    : { id, name: `s${id}`, fee: 0, dt: 200000, ar: [{ name: 'S' }], al: { name: 'A', picUrl: `http://cover/s${id}.jpg` } }
+
+  function dailyApp(): App {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-ipc-'))
+    dirs.push(dir)
+    const nowSec = Math.floor(Date.now() / 1000)
+    const f = vi.fn(async (input: any, init?: RequestInit) => {
+      const url = String(input)
+      const body = String(init?.body ?? '')
+      if (url.includes('musicu.fcg')) {
+        if (body.includes('"method":"get_recommend_feed"')) {
+          return new Response(JSON.stringify({ req: { code: 0, data: { v_shelf: [{ v_niche: [{ v_card: [
+            { id: '999', subtype: 510, title: '每日30首', cover: 'http://cover/daily.jpg', time: nowSec },
+          ] }] }] } } }), { status: 200 })
+        }
+        if (body.includes('"method":"CgiGetDiss"')) {
+          const disstid = JSON.parse(body).req.param.disstid
+          const isDaily = disstid === 999
+          const n = isDaily ? 30 : 50
+          const id = isDaily ? 999 : disstid
+          return new Response(JSON.stringify({ req: { code: 0, data: {
+            dirinfo: { id, title: isDaily ? '的今日私享' : (disstid === 211111 ? '百万收藏' : disstid === 211207 ? '新歌推荐' : '红心雷达'), songnum: n, picurl: `http://cover/${id}.jpg`, mtime: nowSec },
+            songlist: Array.from({ length: n }, (_, i) => qqSong(`${id}_${i}`)),
+            total_song_num: n,
+          } } }), { status: 200 })
+        }
+      }
+      if (url.includes('/api/v1/discovery/recommend/songs')) {
+        return new Response(JSON.stringify({ code: 200, data: { dailySongs: Array.from({ length: 34 }, (_, i) => neSong(1000 + i, 'daily')) } }), { status: 200 })
+      }
+      if (url.includes('/api/homepage/category/daily/song/list')) {
+        return new Response(JSON.stringify({ code: 200, data: {
+          tags: { categoryId: 1000, categoryName: '曲风', tagVOList: [{ categoryId: 1000, tagId: 10015, tagName: '二次元' }] },
+          dailySongs: Array.from({ length: 30 }, (_, i) => neSong(2000 + i, 'style')),
+        } }), { status: 200 })
+      }
+      if (url.includes('/api/v6/playlist/detail/')) {
+        return new Response(JSON.stringify({ code: 200, playlist: { id: 3136952023, name: '雷达', coverImgUrl: 'http://cover/radar.jpg', trackCount: 35, trackIds: Array.from({ length: 35 }, (_, i) => ({ id: 3000 + i })), tracks: [] } }), { status: 200 })
+      }
+      if (url.includes('/api/song/detail')) {
+        return new Response(JSON.stringify({ songs: Array.from({ length: 35 }, (_, i) => neSong(3000 + i, 'style')) }), { status: 200 })
+      }
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof fetch
+    return createApp({ userDataDir: dir, fetchImpl: f })
+  }
+
+  it('QQ：4 张卡 + 日推页，返回 tracks 与 playlist bundle', async () => {
+    const app = dailyApp()
+    const cards = await app.qqDailyCards()
+    expect(cards.map((c) => c.mode)).toEqual(['daily30', 'million', 'newsong', 'heart'])
+    expect(cards[0]).toMatchObject({ title: '日推30首', count: 30, cover: 'http://cover/daily.jpg' })
+    const page = await app.qqDailyRec('daily30')
+    expect(page.tracks.length).toBe(30)
+    expect(page.bundle).toMatchObject({ source: 'qq', kind: 'playlist', dirName: `Q音${todayShanghai().slice(2)}日推30首` })
+    expect(JSON.parse(JSON.stringify(page))).toEqual(page)
+    expect(structuredClone(page)).toEqual(page)
+  })
+
+  it('网易云：3 张卡 + 风格页，返回 tracks 与 playlist bundle', async () => {
+    const app = dailyApp()
+    const cards = await app.neDailyCards()
+    expect(cards.map((c) => c.mode)).toEqual(['daily30', 'style', 'radar'])
+    expect(cards[0].count).toBe(34) // 不截断
+    expect(cards[1]).toMatchObject({ count: 30, tag: '二次元' })
+    const page = await app.neDailyRec('style')
+    expect(page.tracks.length).toBe(30)
+    expect(page.bundle.dirName).toBe(dailyDirName('netease', todayShanghai(), '风格推荐'))
+    expect(structuredClone(page)).toEqual(page)
+  })
+})
+
+describe('歌单批次按歌单位置编号（0.8.x）', () => {
+  const bundle = (totalTracks: number): AlbumBundle => ({
+    source: 'qq', kind: 'playlist', numberTracks: true, dirName: 'mimi', id: 'qq:diss:1',
+    name: 'mimi', artist: '', date: '', company: '', coverUrl: '',
+    totalTracks, discs: [1], discTotals: { 1: totalTracks },
+  })
+
+  it('勾选第 5、7 首 → 05/07，跨批次位置稳定；落歌单名目录', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [
+        { id: 'a5', name: 't5', artist: 'S', album: 'A', cover: '', trackNo: 5, disc: 1 },
+        { id: 'a7', name: 't7', artist: 'S', album: 'A', cover: '', trackNo: 7, disc: 1 },
+      ],
+      quality: '320',
+      source: 'qq',
+      album: bundle(16),
+    })
+    await waitFor(() => env.events.done >= 2)
+    expect(env.events.failed).toBe(0)
+    expect(fs.readdirSync(path.join(env.dl, 'mimi')).sort()).toEqual(['05 t5.mp3', '07 t7.mp3'])
+  })
+
+  it('序号位数取自歌单总曲目数（120 首 → 三位），不是硬编码两位', async () => {
+    const env = await makeEnv()
+    env.app.enqueue({
+      tracks: [{ id: 'a5', name: 't5', artist: 'S', album: 'A', cover: '', trackNo: 5, disc: 1 }],
+      quality: '320',
+      source: 'qq',
+      album: bundle(120),
+    })
+    await waitFor(() => env.events.done >= 1)
+    expect(fs.readdirSync(path.join(env.dl, 'mimi'))).toEqual(['005 t5.mp3'])
+  })
+})
+
+describe('日推播放列表的曲目命名（0.8.x）', () => {
+  for (const src of ['qq', 'netease'] as const) {
+    it(`${src} 曲目没有 trackNo（日推来源）→ 文件名只留曲名，不加序号`, async () => {
+      const env = await makeEnv()
+      const dir = dailyDirName(src, '2026-10-31', '日推30首')
+      const ids = src === 'qq' ? ['a1', 'a2'] : ['123', '124']
+      env.app.enqueue({
+        tracks: ids.map((id, i) => ({ id, name: `t${i + 1}`, artist: 'S', album: 'A', cover: '' })),
+        quality: '320',
+        source: src,
+        album: {
+          source: src, kind: 'playlist', dirName: dir, id: `rec:${src}:daily30:2026-10-31`,
+          name: '日推30首', artist: '', date: '2026-10-31', company: '', coverUrl: '',
+          totalTracks: 2, discs: [1], discTotals: { 1: 2 },
+        },
+      })
+      await waitFor(() => env.events.done >= 2)
+      expect(env.events.failed).toBe(0)
+      expect(fs.readdirSync(path.join(env.dl, dir)).sort()).toEqual(['t1.mp3', 't2.mp3'])
+    })
+  }
 })

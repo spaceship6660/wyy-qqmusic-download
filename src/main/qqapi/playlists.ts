@@ -92,6 +92,19 @@ export async function getFavPlaylists(client: QqClient, euin: string, debug?: (l
   return raw.map(summaryOf).filter((p: QqPlaylistDTO | null): p is QqPlaylistDTO => p !== null)
 }
 
+export interface QqDissInfo {
+  id?: number | string
+  title?: string
+  songnum?: number
+  song_update_num?: number
+  picurl?: string
+  picurl2?: string
+  mtime?: number
+  ctime?: number
+  desc?: string
+  creator?: { nick?: string; name?: string }
+}
+
 export interface QqDissPage {
   tracks: TrackDTO[]
   total: number
@@ -100,6 +113,8 @@ export interface QqDissPage {
   nextBegin: number
   /** total 来源字段名（诊断用；fallback=服务端没给可用总数） */
   totalSource: string
+  /** 歌单元信息：日推卡片要封面/数量/更新时间，翻页逻辑本身不读它。缺失时为 null */
+  dirinfo: QqDissInfo | null
 }
 
 /** 我喜欢的音乐（dirid=201）或歌单歌曲（disstid）分页（CgiGetDiss → data.songlist）。
@@ -165,5 +180,5 @@ export async function getDissTracksPage(
     `diss disstid=${opts.disstid ?? 0} dirid=${opts.dirid ?? 0} begin=${opts.songBegin} ` +
     `raw=${rawLen} kept=${tracks.length} total=${total}(${totalSource}) more=${more}`,
   )
-  return { tracks, total, more, nextBegin, totalSource }
+  return { tracks, total, more, nextBegin, totalSource, dirinfo: (data?.dirinfo ?? null) as QqDissInfo | null }
 }
